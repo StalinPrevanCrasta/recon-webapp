@@ -148,7 +148,7 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         "active_scan": {"id": scan.id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error},
         "subdomains": [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()],
         "http": [rowdict(r, ["id", "url", "status_code", "title", "tech", "response_size", "server", "redirect_chain", "ip", "headers_sent", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()],
-        "dirs": [rowdict(r, ["id", "base_url", "url", "path", "status_code", "size", "words", "lines", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()],
+        "dirs": [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()],
         "screenshots": [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()],
         "raw": [{"id": r.id, "stage": r.stage, "tool": r.tool, "path": r.path} for r in db.query(models.RawOutput).filter_by(scan_id=scan.id).all()],
     }
@@ -179,6 +179,6 @@ def export(target_id: int, format: str = "json", db: Session = Depends(get_db)):
         writer.writerow(["type", "value", "status", "extra"])
         for s in data["subdomains"]: writer.writerow(["subdomain", s["name"], "", ",".join(s["sources"])])
         for h in data["http"]: writer.writerow(["http", h["url"], h["status_code"], ",".join(h["tech"] or [])])
-        for d in data["dirs"]: writer.writerow(["dir", d["url"], d["status_code"], d["size"]])
+        for d in data["dirs"]: writer.writerow(["content_path", d["url"], d["status_code"], f"{d.get('confidence', '')} {d.get('size', '')}"])
         return Response(buf.getvalue(), media_type="text/csv")
     raise HTTPException(400, "format must be json or csv")

@@ -189,9 +189,9 @@ tech/title: nginx
 search: admin
 ```
 
-### Stage 3: Directories / Content Discovery
+### Stage 3: Content Paths
 
-The app runs `ffuf` against live hosts when a dirb wordlist is selected and FFUF is enabled.
+The app runs `ffuf` against live hosts when FFUF is enabled. The UI calls these **Content Paths** because FFUF wordlists include both files and directories, such as `/.gitignore`, `/.git/config`, `/admin/`, and `/api`.
 
 Configurable FFUF options in the UI:
 
@@ -204,10 +204,14 @@ php,txt,json,bak
 - match codes, for example:
 
 ```text
-200,204,301,302,307,401,403
+all
 ```
 
+- automatic calibration / auto calibration (`-ac`), enabled by default
+- per-host timeout
 - recursive fuzzing toggle
+
+Before fuzzing each host, the worker probes several random non-existent paths and stores a wildcard baseline in raw logs. If the baseline responses are identical, the worker derives dynamic FFUF filters (`-fs`, `-fw`, `-fl`) so generic WAF/server responses do not inflate the content-path count.
 
 Stored result fields include:
 
@@ -217,6 +221,12 @@ Stored result fields include:
 - response size
 - words
 - lines
+- content type
+- redirect location
+- duration
+- body/signature hash
+- confidence: `confirmed`, `possible`, `filtered`, or `unverified`
+- filtered reason
 - open-directory heuristic
 - headers sent
 - first-seen scan marker

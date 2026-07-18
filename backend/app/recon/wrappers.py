@@ -1,6 +1,9 @@
+import hashlib
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlparse
+
 
 def _headers(user_agent: str | None = None, headers: dict[str, str] | None = None) -> list[str]:
     merged = dict(headers or {})
@@ -12,6 +15,7 @@ def _headers(user_agent: str | None = None, headers: dict[str, str] | None = Non
             out.extend(["-H", f"{key}: {value}"])
     return out
 
+
 def build_httpx_command(input_file: Path, output_file: Path, user_agent: str | None = None, headers: dict[str, str] | None = None, proxy: str | None = None) -> list[str]:
     cmd = [
         "httpx", "-l", str(input_file), "-json", "-silent", "-status-code", "-title",
@@ -22,6 +26,7 @@ def build_httpx_command(input_file: Path, output_file: Path, user_agent: str | N
         cmd.extend(["-proxy", proxy])
     cmd.extend(["-o", str(output_file)])
     return cmd
+
 
 def parse_httpx_jsonl(text: str) -> list[dict]:
     rows: list[dict] = []
@@ -41,15 +46,46 @@ def parse_httpx_jsonl(text: str) -> list[dict]:
         })
     return rows
 
-def build_ffuf_command(base_url: str, wordlist: Path, output_file: Path, extensions: str = "", recursive: bool = False, match_codes: str = "200,204,301,302,307,401,403", filter_size: str | None = None, threads: int = 25, rate: int | None = None, headers: dict[str, str] | None = None, proxy: str | None = None) -> list[str]:
+
+def normalize_content_path(path: str | None) -> str | None:
+    if path is None:
+        return None
+    normalized = re.sub(r"/+", "/", path.strip())
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return normalized
+
+
+def build_ffuf_command(
+    base_url: str,
+    wordlist: Path,
+    output_file: Path,
+    extensions: str = "",
+    recursive: bool = False,
+    match_codes: str = "200,204,301,302,307,401,403",
+    filter_size: str | None = None,
+    threads: int = 25,
+    rate: int | None = None,
+    headers: dict[str, str] | None = None,
+    proxy: str | None = None,
+    auto_calibration: bool = True,
+    filter_words: str | None = None,
+    filter_lines: str | None = None,
+) -> list[str]:
     target = base_url.rstrip("/") + "/FUZZ"
     cmd = ["ffuf", "-u", target, "-w", str(wordlist), "-of", "json", "-o", str(output_file), "-mc", match_codes, "-t", str(threads)]
+    if auto_calibration:
+        cmd.append("-ac")
     if extensions:
         cmd.extend(["-e", extensions])
     if recursive:
         cmd.append("-recursion")
     if filter_size:
         cmd.extend(["-fs", str(filter_size)])
+    if filter_words:
+        cmd.extend(["-fw", str(filter_words)])
+    if filter_lines:
+        cmd.extend(["-fl", str(filter_lines)])
     if rate:
         cmd.extend(["-rate", str(rate)])
     for key, value in (headers or {}).items():
@@ -57,6 +93,7 @@ def build_ffuf_command(base_url: str, wordlist: Path, output_file: Path, extensi
     if proxy:
         cmd.extend(["-x", proxy])
     return cmd
+
 
 def parse_ffuf_json(text: str) -> list[dict]:
     if not text.strip():
@@ -67,16 +104,32 @@ def parse_ffuf_json(text: str) -> list[dict]:
         url = item.get("url")
         title = (item.get("title") or "")
         parsed_path = urlparse(url).path if url else None
+        size = item.get("length")
+        words = item.get("words")
+        lines = item.get("lines")
+        status = item.get("status")
+        duration = item.get("duration")
+        duration_ms = int(duration / 1_000_000) if isinstance(duration, int) else duration
+        signature = f"{status}:{size}:{words}:{lines}".encode()
         rows.append({
             "url": url,
             "path": parsed_path,
-            "status_code": item.get("status"),
-            "size": item.get("length"),
-            "words": item.get("words"),
-            "lines": item.get("lines"),
+            "normalized_path": normalize_content_path(parsed_path),
+            "method": item.get("method") or "GET",
+            "status_code": status,
+            "size": size,
+            "words": words,
+            "lines": lines,
+            "content_type": item.get("content-type") or item.get("content_type") or item.get("contenttype"),
+            "redirect_location": item.get("redirectlocation") or item.get("redirect_location") or item.get("location"),
+            "duration_ms": duration_ms,
+            "body_hash": item.get("body_hash") or item.get("hash") or hashlib.sha256(signature).hexdigest(),
+            "confidence": "unverified",
+            "filtered_reason": None,
             "open_directory": "index of" in title.lower() or (parsed_path or "").endswith("/") and item.get("status") == 200 and item.get("words", 0) > 0 and "directory" in title.lower(),
         })
     return rows
+
 
 def build_gowitness_command(input_file: Path, output_dir: Path, user_agent: str | None = None, proxy: str | None = None) -> list[str]:
     cmd = ["gowitness", "scan", "file", "-f", str(input_file), "--screenshot-path", str(output_dir), "--screenshot-format", "png", "--write-jsonl"]
@@ -86,11 +139,14 @@ def build_gowitness_command(input_file: Path, output_dir: Path, user_agent: str 
         cmd.extend(["--chrome-proxy", proxy])
     return cmd
 
+
 def build_subfinder_command(domain: str, output_file: Path) -> list[str]:
     return ["subfinder", "-d", domain, "-silent", "-all", "-o", str(output_file)]
 
+
 def build_amass_command(domain: str, output_file: Path) -> list[str]:
     return ["amass", "enum", "-passive", "-d", domain, "-o", str(output_file)]
+
 
 def build_puredns_command(domain: str, wordlist: Path, resolvers: Path, output_file: Path) -> list[str]:
     return ["puredns", "bruteforce", str(wordlist), domain, "-r", str(resolvers), "-w", str(output_file), "--write-wildcards", str(output_file.with_suffix('.wildcards.txt'))]

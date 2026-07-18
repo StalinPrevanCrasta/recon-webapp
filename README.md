@@ -52,6 +52,8 @@ DEFAULT_FFUF_WORDLIST=/usr/share/seclists/Discovery/Web-Content/common.txt
 
 The backend/worker Docker image installs SecLists so `/usr/share/seclists/Discovery/Web-Content/common.txt` is available in both containers. If neither the configured default nor bundled fallback exists, FFUF scans are rejected with a clear validation error instead of being silently skipped.
 
+FFUF also runs with automatic calibration (`-ac`) and a per-host wildcard baseline. Before each host fuzz, the worker probes random non-existent paths and records status, size, word count, line count, and a body hash in raw logs. Repeated wildcard responses are used as dynamic `-fs`/`-fw`/`-fl` filters and matching results are stored as `filtered` instead of counted as high-confidence content.
+
 Rebuild after changing Docker defaults:
 
 ```bash

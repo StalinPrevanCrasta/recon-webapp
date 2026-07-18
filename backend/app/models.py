@@ -61,17 +61,28 @@ class HttpxResult(Base):
 
 class DirbResult(Base):
     __tablename__ = "dirb_results"
-    __table_args__ = (UniqueConstraint("scan_id", "url", name="uq_scan_dir_url"),)
+    __table_args__ = (
+        UniqueConstraint("scan_id", "url", name="uq_scan_dir_url"),
+        UniqueConstraint("scan_id", "base_url", "normalized_path", "method", name="uq_scan_base_path_method"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
     base_url: Mapped[str] = mapped_column(String(1024), index=True)
     url: Mapped[str] = mapped_column(String(2048), index=True)
     path: Mapped[str | None] = mapped_column(String(1024))
+    normalized_path: Mapped[str | None] = mapped_column(String(1024), index=True)
+    method: Mapped[str] = mapped_column(String(16), default="GET")
     status_code: Mapped[int | None] = mapped_column(Integer, index=True)
     size: Mapped[int | None] = mapped_column(Integer)
     words: Mapped[int | None] = mapped_column(Integer)
     lines: Mapped[int | None] = mapped_column(Integer)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    redirect_location: Mapped[str | None] = mapped_column(Text)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    body_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    confidence: Mapped[str] = mapped_column(String(32), default="unverified", index=True)
+    filtered_reason: Mapped[str | None] = mapped_column(Text)
     open_directory: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     headers_sent: Mapped[dict] = mapped_column(JSON, default=dict)
     first_seen_scan_id: Mapped[int] = mapped_column(Integer, index=True)

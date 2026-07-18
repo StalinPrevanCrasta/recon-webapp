@@ -1,5 +1,7 @@
+import hashlib
 import json
 import re
+import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,7 +12,7 @@ from app import models
 from app.recon.runner import run_command
 from app.recon.wrappers import (
     build_amass_command, build_ffuf_command, build_gowitness_command, build_httpx_command,
-    build_puredns_command, build_subfinder_command, parse_ffuf_json, parse_httpx_jsonl,
+    build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
@@ -45,6 +47,68 @@ def raw_path(scan_id: int, stage: str, tool: str, suffix: str = "txt") -> Path:
 def record_raw(db: Session, scan_id: int, stage: str, tool: str, path: Path) -> None:
     db.add(models.RawOutput(scan_id=scan_id, stage=stage, tool=tool, path=str(path)))
     db.commit()
+
+def response_signature(item: dict) -> tuple:
+    return (item.get("status_code"), item.get("size"), item.get("words"), item.get("lines"), item.get("body_hash"))
+
+def probe_random_paths(base_url: str, count: int = 3, headers: dict[str, str] | None = None, proxy: str | None = None, timeout: int = 10) -> list[dict]:
+    proxies = {"http://": proxy, "https://": proxy} if proxy else None
+    rows: list[dict] = []
+    for _ in range(count):
+        path = f"/__ffuf_baseline_{secrets.token_hex(8)}"
+        url = base_url.rstrip("/") + path
+        try:
+            response = pyhttpx.get(url, headers=headers or {}, proxy=proxy, follow_redirects=False, timeout=timeout)
+            body = response.content or b""
+            text = body.decode(response.encoding or "utf-8", errors="ignore")
+            rows.append({
+                "url": url,
+                "path": path,
+                "status_code": response.status_code,
+                "size": len(body),
+                "words": len(text.split()),
+                "lines": len(text.splitlines()),
+                "content_type": response.headers.get("content-type"),
+                "redirect_location": response.headers.get("location"),
+                "body_hash": hashlib.sha256(body).hexdigest(),
+            })
+        except Exception as exc:
+            rows.append({"url": url, "path": path, "error": str(exc)})
+    return rows
+
+def derive_ffuf_filters(baseline: list[dict]) -> dict[str, str]:
+    valid = [row for row in baseline if not row.get("error")]
+    if len(valid) < 2:
+        return {}
+    keys = ["status_code", "size", "words", "lines", "body_hash"]
+    if not all(tuple(row.get(k) for k in keys) == tuple(valid[0].get(k) for k in keys) for row in valid[1:]):
+        return {}
+    filters: dict[str, str] = {}
+    if valid[0].get("size") is not None:
+        filters["filter_size"] = str(valid[0]["size"])
+    if valid[0].get("words") is not None:
+        filters["filter_words"] = str(valid[0]["words"])
+    if valid[0].get("lines") is not None:
+        filters["filter_lines"] = str(valid[0]["lines"])
+    return filters
+
+def classify_ffuf_result(result: dict, baseline: list[dict]) -> dict:
+    classified = dict(result)
+    result_tuple = (result.get("status_code"), result.get("size"), result.get("words"), result.get("lines"))
+    baseline_tuples = {(row.get("status_code"), row.get("size"), row.get("words"), row.get("lines")) for row in baseline if not row.get("error")}
+    if result_tuple in baseline_tuples:
+        classified["confidence"] = "filtered"
+        classified["filtered_reason"] = "matches wildcard baseline response"
+    elif result.get("status_code") in {200, 201, 204, 301, 302, 307, 308}:
+        classified["confidence"] = "confirmed"
+        classified["filtered_reason"] = None
+    elif result.get("status_code") in {401, 403}:
+        classified["confidence"] = "possible"
+        classified["filtered_reason"] = None
+    else:
+        classified["confidence"] = "unverified"
+        classified["filtered_reason"] = None
+    return classified
 
 def upsert_subdomain(db: Session, target_id: int, scan_id: int, name: str, source: str, depth: int) -> None:
     name = name.strip().lower().rstrip('.')
@@ -169,12 +233,46 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> N
     for idx, url in enumerate(urls):
         out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url), "json")
         try:
-            run_command(build_ffuf_command(url, resolved_wordlist.path, out, config.get("extensions", ""), bool(config.get("ffuf_recursive", False)), config.get("ffuf_match_codes", "200,204,301,302,307,401,403"), config.get("ffuf_filter_size"), int(config.get("ffuf_threads", 25)), config.get("ffuf_rate"), settings.headers, settings.proxy), timeout=3600)
+            baseline = probe_random_paths(url, int(config.get("ffuf_baseline_count", 3)), settings.headers, settings.proxy)
+            baseline_out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url) + "-baseline", "json")
+            baseline_out.write_text(json.dumps({"base_url": url, "wildcard_baseline": baseline}, indent=2), encoding="utf-8")
+            record_raw(db, scan.id, "ffuf", "ffuf-baseline", baseline_out)
+            derived_filters = derive_ffuf_filters(baseline)
+            filter_size = config.get("ffuf_filter_size") or derived_filters.get("filter_size")
+            filter_words = config.get("ffuf_filter_words") or derived_filters.get("filter_words")
+            filter_lines = config.get("ffuf_filter_lines") or derived_filters.get("filter_lines")
+            run_command(build_ffuf_command(
+                url,
+                resolved_wordlist.path,
+                out,
+                config.get("extensions", ""),
+                bool(config.get("ffuf_recursive", False)),
+                config.get("ffuf_match_codes", "all"),
+                filter_size,
+                int(config.get("ffuf_threads", 25)),
+                config.get("ffuf_rate"),
+                settings.headers,
+                settings.proxy,
+                bool(config.get("ffuf_auto_calibration", True)),
+                filter_words,
+                filter_lines,
+            ), timeout=int(config.get("ffuf_host_timeout", 3600)))
             record_raw(db, scan.id, "ffuf", "ffuf", out)
+            seen_keys: set[tuple] = set()
             for item in parse_ffuf_json(out.read_text(errors="ignore")):
                 if not item.get("url"):
                     continue
-                prior = db.query(models.DirbResult).filter_by(target_id=scan.target_id, url=item["url"]).order_by(models.DirbResult.id.asc()).first()
+                item = classify_ffuf_result(item, baseline)
+                item["normalized_path"] = normalize_content_path(item.get("normalized_path") or item.get("path"))
+                item["method"] = item.get("method") or "GET"
+                dedupe_key = (url, item.get("normalized_path"), item.get("method"))
+                if dedupe_key in seen_keys:
+                    continue
+                seen_keys.add(dedupe_key)
+                existing = db.query(models.DirbResult).filter_by(scan_id=scan.id, base_url=url, normalized_path=item.get("normalized_path"), method=item.get("method")).one_or_none()
+                if existing:
+                    continue
+                prior = db.query(models.DirbResult).filter_by(target_id=scan.target_id, normalized_path=item.get("normalized_path"), method=item.get("method")).order_by(models.DirbResult.id.asc()).first()
                 db.add(models.DirbResult(target_id=scan.target_id, scan_id=scan.id, base_url=url, first_seen_scan_id=prior.first_seen_scan_id if prior else scan.id, headers_sent=settings.headers, **item))
             db.commit()
         except Exception as e:
