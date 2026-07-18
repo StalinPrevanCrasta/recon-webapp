@@ -1,0 +1,613 @@
+# Bug Bounty Recon Webapp User Guide
+
+This guide explains how to operate the recon webapp from the browser after the Docker stack is running.
+
+## What This Tool Does
+
+The app runs a repeatable recon workflow for a target domain:
+
+1. Enumerates subdomains with passive and active sources.
+2. Probes discovered hosts with `httpx`.
+3. Runs directory/content fuzzing with `ffuf`.
+4. Screenshots live hosts with `gowitness`.
+5. Stores results, raw output, screenshots, notes, and scan history.
+6. Lets you filter, review, export, and compare repeat scans.
+
+The app shells out to recon CLI tools inside Docker containers. You do not install recon tools manually on the host.
+
+## Accessing the App
+
+Start the stack:
+
+```bash
+docker compose up -d --build
+```
+
+Open the browser UI:
+
+```text
+http://localhost:3001
+```
+
+Backend health check:
+
+```text
+http://localhost:8000/api/health
+```
+
+## First-Time Setup
+
+Before running a useful scan, configure wordlists and spoofing settings.
+
+### 1. Upload Wordlists
+
+The left sidebar has upload controls for two wordlist types:
+
+- **Subdomain wordlist**: used for active DNS bruteforce and recursive subdomain discovery.
+- **Dirb wordlist**: used by `ffuf` for directory/content discovery.
+
+Upload files with one entry per line.
+
+Example subdomain wordlist:
+
+```text
+www
+api
+admin
+dev
+stage
+staging
+internal
+portal
+```
+
+Example directory wordlist:
+
+```text
+admin
+login
+api
+swagger
+backup
+uploads
+config
+```
+
+After upload, each wordlist appears in its dropdown. Select the wordlist before starting the scan.
+
+### 2. Configure Request Settings
+
+Use the **Settings** section in the left sidebar.
+
+Available settings:
+
+- **User-Agent**: fixed User-Agent used by supported tool calls.
+- **Proxy**: optional HTTP proxy, for example Burp:
+
+```text
+http://host.docker.internal:8080
+```
+
+- **Headers**: one header per line:
+
+```text
+X-Forwarded-For: 127.0.0.1
+X-Real-IP: 127.0.0.1
+Cookie: session=example
+Authorization: Bearer example
+```
+
+Click **Save settings** before running a scan.
+
+These settings are stored on disk and reused by later scans.
+
+## Running a Recon Scan
+
+1. Enter a target domain in the top input.
+
+Example:
+
+```text
+example.com
+```
+
+Do not include paths. The app normalizes simple `http://` or `https://` input, but domain-only input is preferred.
+
+2. Select a **subdomain wordlist** from the sidebar.
+3. Select a **dirb wordlist** if you want FFUF to run.
+4. Configure FFUF options if needed.
+5. Click **Run Recon**.
+
+The progress panel shows the active stage:
+
+- `subdomains`
+- `httpx`
+- `ffuf`
+- `screenshots`
+- `complete`
+- `failed`
+
+Scans run in the Celery worker, so the UI remains usable while a scan is running.
+
+## Pipeline Stages
+
+### Stage 1: Subdomains
+
+The app collects subdomains from:
+
+- `subfinder`
+- `amass` passive mode
+- `crt.sh`
+- active DNS bruteforce with `puredns`
+- simple mutation/permutation patterns for smarter second-level candidates
+
+Recursive active discovery uses the selected subdomain wordlist at each depth. Results are deduplicated and tagged with source and depth.
+
+In the **Subdomains** tab, review:
+
+- `name`: discovered hostname
+- `sources`: tools/sources that found it
+- `depths`: recursion depths where it appeared
+- `is_new`: whether this result first appeared in the current scan compared with a previous scan
+- `interesting`: manual flag
+- `note`: analyst note
+
+### Stage 2: Live Hosts
+
+The app runs `httpx` against discovered subdomains.
+
+Captured fields include:
+
+- URL
+- status code
+- page title
+- detected technologies
+- response size
+- server header
+- redirect location/chain field where available
+- IP
+- headers sent for the batch
+
+The **Live Hosts** tab separates:
+
+- **200 OK** hosts
+- **Other status codes**: 3xx, 4xx, 5xx, and other non-200 responses
+
+Use filters to search by:
+
+- free text
+- exact status code
+- technology/title text
+
+Examples:
+
+```text
+status: 200
+tech/title: nginx
+search: admin
+```
+
+### Stage 3: Directories / Content Discovery
+
+The app runs `ffuf` against live hosts when a dirb wordlist is selected and FFUF is enabled.
+
+Configurable FFUF options in the UI:
+
+- extensions, for example:
+
+```text
+php,txt,json,bak
+```
+
+- match codes, for example:
+
+```text
+200,204,301,302,307,401,403
+```
+
+- recursive fuzzing toggle
+
+Stored result fields include:
+
+- discovered URL
+- path
+- status code
+- response size
+- words
+- lines
+- open-directory heuristic
+- headers sent
+- first-seen scan marker
+
+The open-directory heuristic flags likely listings when page titles or response patterns look like directory indexes.
+
+### Stage 4: Screenshots
+
+The app screenshots notable live hosts with `gowitness`.
+
+The **Screenshots** tab shows a thumbnail gallery.
+
+Use it to visually triage:
+
+- login panels
+- admin consoles
+- exposed dashboards
+- default pages
+- error pages
+- staging/dev interfaces
+
+Click a screenshot to open the full image.
+
+### Stage 5: Raw Output
+
+The **Raw Output** tab lists raw files generated by each stage.
+
+Use raw output when:
+
+- a parsed result looks wrong
+- you need exact CLI output
+- you want evidence for a report
+- a tool failed and you need the error text
+
+Raw output is persisted under:
+
+```text
+./raw-output
+```
+
+## Re-Running Scans
+
+A target can have multiple scans. Repeat scans are useful for finding changes over time.
+
+When a target has a previous scan, the UI marks results as new with `is_new`.
+
+Use this to quickly find:
+
+- new subdomains
+- newly live services
+- new paths
+- changed exposure
+
+The backend also supports re-running a single stage through the API:
+
+```http
+POST /api/scans/{scan_id}/rerun
+Content-Type: application/json
+
+{
+  "stage": "ffuf",
+  "dirb_wordlist_id": 1,
+  "extensions": "php,txt",
+  "ffuf_recursive": true,
+  "ffuf_match_codes": "200,204,301,302,307,401,403",
+  "ffuf_threads": 25
+}
+```
+
+Supported stage values are:
+
+- `subdomains`
+- `httpx`
+- `ffuf`
+- `screenshots`
+
+## Exporting Results
+
+From a target view, use the export links:
+
+- JSON export
+- CSV export
+
+API equivalents:
+
+```text
+GET /api/targets/{target_id}/export?format=json
+GET /api/targets/{target_id}/export?format=csv
+```
+
+Use JSON when you want complete structured data. Use CSV for quick spreadsheet review.
+
+## Marking Interesting Findings
+
+The backend supports marking individual items interesting with notes.
+
+API format:
+
+```http
+PATCH /api/{kind}/{item_id}/interesting
+Content-Type: application/json
+
+{
+  "interesting": true,
+  "note": "Potential admin panel; review auth requirements",
+  "tag": "admin"
+}
+```
+
+Supported `kind` values:
+
+- `subdomains`
+- `http`
+- `dirs`
+- `screenshots`
+
+Notes and interesting flags are persisted in SQLite.
+
+## Using Burp or a Local Proxy
+
+To route supported batches through Burp running on the Windows host:
+
+1. Start Burp and listen on `127.0.0.1:8080`.
+2. In the app Settings proxy field, enter:
+
+```text
+http://host.docker.internal:8080
+```
+
+3. Click **Save settings**.
+4. Run the scan.
+5. Review Burp HTTP history.
+
+The app records the headers configured for request batches so spoofing can be verified later.
+
+## Common Workflows
+
+### Quick Recon
+
+1. Upload a small subdomain wordlist.
+2. Upload a small dirb wordlist.
+3. Enter domain.
+4. Click **Run Recon**.
+5. Start triage in **Live Hosts** with 200 OK hosts.
+6. Review **Screenshots**.
+7. Export JSON.
+
+### Header Spoofing Test
+
+1. Add headers in Settings:
+
+```text
+X-Forwarded-For: 127.0.0.1
+X-Originating-IP: 127.0.0.1
+X-Real-IP: 127.0.0.1
+```
+
+2. Add Burp proxy if needed.
+3. Run scan.
+4. Check **Live Hosts** and **Directories** for `headers_sent`.
+5. Verify in Burp history if proxy is enabled.
+
+### Repeat Scan Diff
+
+1. Run a baseline scan.
+2. Come back later and run the same target again.
+3. Open the latest scan.
+4. Filter tables for `is_new` rows.
+5. Review new hosts/paths first.
+
+### FFUF-Only Follow-Up
+
+Use the rerun API to run FFUF again with a different wordlist or extensions without re-running full subdomain enumeration.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/scans/1/rerun \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "stage":"ffuf",
+    "dirb_wordlist_id":2,
+    "extensions":"php,asp,aspx,txt,json,bak",
+    "ffuf_recursive":true,
+    "ffuf_match_codes":"200,204,301,302,307,401,403"
+  }'
+```
+
+## Data Locations
+
+Host-side persisted folders:
+
+```text
+./wordlists
+./screenshots
+./raw-output
+```
+
+Docker volume:
+
+```text
+recon-data:/data/recon.db
+```
+
+Inside backend/worker containers:
+
+```text
+/data/recon.db
+/data/wordlists
+/data/screenshots
+/data/raw
+```
+
+## Troubleshooting
+
+### UI Does Not Open
+
+Check containers:
+
+```bash
+docker compose ps
+```
+
+Expected services:
+
+- `backend`
+- `frontend`
+- `redis`
+- `worker`
+
+The UI is mapped to:
+
+```text
+http://localhost:3001
+```
+
+### Backend Health Fails
+
+Run:
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+Expected response:
+
+```json
+{"ok": true}
+```
+
+Check logs:
+
+```bash
+docker compose logs backend
+```
+
+### Worker Is Not Processing Scans
+
+Check worker logs:
+
+```bash
+docker compose logs worker
+```
+
+Check Redis is running:
+
+```bash
+docker compose ps redis
+```
+
+### A Recon Tool Is Missing
+
+Check inside the backend container:
+
+```bash
+docker compose exec backend sh -c 'command -v subfinder amass httpx ffuf gowitness puredns shuffledns massdns'
+```
+
+The intended `httpx` binary is:
+
+```text
+/root/go/bin/httpx
+```
+
+This matters because Python also has an `httpx` package/console script name.
+
+### Port Conflict
+
+This project intentionally avoids exposing Redis to the host.
+
+Default host ports:
+
+```text
+frontend: 3001
+backend: 8000
+```
+
+If either is busy, change the left side of the port mapping in `docker-compose.yml`.
+
+Example:
+
+```yaml
+ports:
+  - "3002:80"
+```
+
+### Wordlist Does Not Appear
+
+Refresh the page after upload. Also check:
+
+```bash
+docker compose logs backend
+```
+
+Uploaded files are persisted under:
+
+```text
+./wordlists/subdomain
+./wordlists/dirb
+```
+
+## API Quick Reference
+
+### Health
+
+```http
+GET /api/health
+```
+
+### Settings
+
+```http
+GET /api/settings
+PUT /api/settings
+```
+
+Example:
+
+```json
+{
+  "user_agent": "recon-webapp/1.0",
+  "rotate_user_agents": [],
+  "headers": {
+    "X-Forwarded-For": "127.0.0.1"
+  },
+  "proxy": "http://host.docker.internal:8080"
+}
+```
+
+### Wordlists
+
+```http
+GET /api/wordlists
+GET /api/wordlists?kind=subdomain
+GET /api/wordlists?kind=dirb
+POST /api/wordlists/subdomain
+POST /api/wordlists/dirb
+```
+
+### Scans
+
+```http
+POST /api/scans/run
+GET /api/scans/{scan_id}
+POST /api/scans/{scan_id}/rerun
+```
+
+### Targets and Results
+
+```http
+GET /api/targets
+GET /api/targets/{target_id}/results
+GET /api/targets/{target_id}/results?scan_id={scan_id}
+GET /api/targets/{target_id}/export?format=json
+GET /api/targets/{target_id}/export?format=csv
+```
+
+### Interesting Flags
+
+```http
+PATCH /api/{kind}/{item_id}/interesting
+```
+
+## Current Limitations
+
+- The UI includes basic controls for the main workflow; some advanced actions, such as stage-only reruns and marking interesting items, are currently available through API endpoints.
+- Recursive DNS bruteforce can grow fast. Start with depth 1 or 2 and small wordlists.
+- Header/proxy support is applied to supported tool wrappers. Always verify critical spoofing behavior in raw output or Burp.
+- Screenshots depend on `gowitness` and Chromium working inside the container.
+
+## Safe Operating Notes
+
+- Use this only on targets you are allowed to test.
+- Start with small wordlists and conservative recursion depth.
+- Use rate limits and thread counts appropriate for the target.
+- Keep raw output and exports as evidence for later review.
