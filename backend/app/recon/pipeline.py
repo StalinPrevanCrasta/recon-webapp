@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import secrets
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,6 +47,17 @@ def raw_path(scan_id: int, stage: str, tool: str, suffix: str = "txt") -> Path:
 
 def record_raw(db: Session, scan_id: int, stage: str, tool: str, path: Path) -> None:
     db.add(models.RawOutput(scan_id=scan_id, stage=stage, tool=tool, path=str(path)))
+    db.commit()
+
+def clear_scan_raw(db: Session, scan_id: int, stage_only: str | None = None) -> None:
+    scan_dir = RAW_DIR / f"scan-{scan_id}"
+    if stage_only:
+        shutil.rmtree(scan_dir / stage_only, ignore_errors=True)
+        db.query(models.RawOutput).filter_by(scan_id=scan_id, stage=stage_only).delete()
+    else:
+        shutil.rmtree(scan_dir, ignore_errors=True)
+        db.query(models.RawOutput).filter_by(scan_id=scan_id).delete()
+    scan_dir.mkdir(parents=True, exist_ok=True)
     db.commit()
 
 def response_signature(item: dict) -> tuple:
@@ -114,6 +126,7 @@ def upsert_subdomain(db: Session, target_id: int, scan_id: int, name: str, sourc
     name = name.strip().lower().rstrip('.')
     if not name:
         return
+    db.flush()
     row = db.query(models.Subdomain).filter_by(target_id=target_id, name=name).one_or_none()
     if row:
         row.scan_id = scan_id
@@ -121,6 +134,7 @@ def upsert_subdomain(db: Session, target_id: int, scan_id: int, name: str, sourc
         row.depths = sorted(set((row.depths or []) + [depth]))
     else:
         db.add(models.Subdomain(target_id=target_id, scan_id=scan_id, name=name, sources=[source], depths=[depth], first_seen_scan_id=scan_id))
+    db.flush()
 
 def crtsh(domain: str) -> set[str]:
     try:
@@ -158,15 +172,17 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     domain = target.domain
     wordlist = db.get(models.Wordlist, config.get("subdomain_wordlist_id")) if config.get("subdomain_wordlist_id") else None
     depth_max = int(config.get("recursion_depth", 2))
+    tool_timeouts = {"subfinder": int(config.get("subfinder_timeout", 300)), "amass": int(config.get("amass_timeout", 120))}
     seen: set[str] = set()
     for tool, builder in [("subfinder", build_subfinder_command), ("amass", build_amass_command)]:
         out = raw_path(scan.id, "subdomains", tool)
         try:
-            run_command(builder(domain, out), timeout=900)
+            run_command(builder(domain, out), timeout=tool_timeouts.get(tool, 300))
             record_raw(db, scan.id, "subdomains", tool, out)
             for name in out.read_text(errors="ignore").splitlines():
                 seen.add(name.strip().lower())
                 upsert_subdomain(db, target.id, scan.id, name, tool, 0)
+            db.commit()
         except Exception as e:
             out.write_text(str(e))
             record_raw(db, scan.id, "subdomains", f"{tool}-error", out)
@@ -176,6 +192,7 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     record_raw(db, scan.id, "subdomains", "crtsh", ctout)
     for name in ctnames:
         seen.add(name); upsert_subdomain(db, target.id, scan.id, name, "crtsh", 0)
+    db.commit()
     frontier = set(seen) or {domain}
     if wordlist:
         if not DEFAULT_RESOLVERS.exists():
@@ -304,6 +321,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
     scan = db.get(models.Scan, scan_id)
     if not scan:
         return
+    clear_scan_raw(db, scan_id, stage_only)
     scan.started_at = datetime.now(UTC); set_scan(db, scan, stage_only or "subdomains", 5)
     try:
         if stage_only in (None, "subdomains"):
@@ -318,4 +336,8 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             set_scan(db, scan, "screenshots", 85); run_screenshots(db, scan)
         scan.finished_at = datetime.now(UTC); set_scan(db, scan, "complete", 100, "complete")
     except Exception as e:
-        scan.finished_at = datetime.now(UTC); set_scan(db, scan, "failed", scan.progress, "failed", str(e))
+        progress = getattr(scan, "progress", 0) or 0
+        db.rollback()
+        scan = db.get(models.Scan, scan_id)
+        if scan:
+            scan.finished_at = datetime.now(UTC); set_scan(db, scan, "failed", progress, "failed", str(e))

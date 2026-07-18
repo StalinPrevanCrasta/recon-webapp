@@ -145,7 +145,7 @@ def build_subfinder_command(domain: str, output_file: Path) -> list[str]:
 
 
 def build_amass_command(domain: str, output_file: Path) -> list[str]:
-    return ["amass", "enum", "-passive", "-d", domain, "-o", str(output_file)]
+    return ["amass", "enum", "-passive", "-d", domain, "-oA", str(output_file.with_suffix(""))]
 
 
 def build_puredns_command(domain: str, wordlist: Path, resolvers: Path, output_file: Path) -> list[str]:

@@ -105,3 +105,66 @@ def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
         assert {Path(r.image_path).suffix for r in rows} == {".png", ".jpg", ".jpeg"}
     finally:
         db.close()
+
+
+def test_upsert_subdomain_deduplicates_pending_rows_before_commit():
+    db, target, scan = make_scan()
+    try:
+        pipeline.upsert_subdomain(db, target.id, scan.id, "office.example.com", "subfinder", 0)
+        pipeline.upsert_subdomain(db, target.id, scan.id, "office.example.com", "crtsh", 0)
+        db.commit()
+
+        rows = db.query(models.Subdomain).filter_by(target_id=target.id, name="office.example.com").all()
+        assert len(rows) == 1
+        assert rows[0].sources == ["crtsh", "subfinder"]
+    finally:
+        db.close()
+
+
+
+def test_enumerate_subdomains_commits_subfinder_results_before_amass(monkeypatch, tmp_path):
+    db, target, scan = make_scan()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "crtsh", lambda domain: set())
+
+    def fake_run_command(cmd, timeout=None):
+        if cmd[0] == "subfinder":
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_text("api.example.com\n", encoding="utf-8")
+            return "", ""
+        if cmd[0] == "amass":
+            check_db = SessionLocal()
+            try:
+                assert check_db.query(models.Subdomain).filter_by(target_id=target.id, name="api.example.com").count() == 1
+            finally:
+                check_db.close()
+            raise RuntimeError("stop amass after visibility check")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        names = pipeline.enumerate_subdomains(db, scan)
+        assert "api.example.com" in names
+    finally:
+        db.close()
+
+
+def test_execute_scan_clears_stale_raw_files_for_reused_scan_id(monkeypatch, tmp_path):
+    db, _, scan = make_scan({"run_ffuf": False, "run_screenshots": False})
+    scan_id = scan.id
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    stale = tmp_path / "raw" / f"scan-{scan_id}" / "ffuf" / "stale.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("old ffuf output", encoding="utf-8")
+    db.close()
+
+    monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: [])
+    monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: [])
+
+    db = SessionLocal()
+    try:
+        pipeline.execute_scan(db, scan_id)
+        assert not stale.exists()
+        assert (tmp_path / "raw" / f"scan-{scan_id}").exists()
+    finally:
+        db.close()

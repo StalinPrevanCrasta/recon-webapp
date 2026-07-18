@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_httpx_command, build_ffuf_command, parse_httpx_jsonl, parse_ffuf_json
+from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, parse_httpx_jsonl, parse_ffuf_json
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -68,3 +68,12 @@ def test_parse_ffuf_json_flags_index_of_listing():
     rows = parse_ffuf_json(data)
     assert rows[0]["path"] == "/admin/"
     assert rows[0]["open_directory"] is True
+
+
+def test_amass_command_uses_supported_output_prefix_flag(tmp_path):
+    out = tmp_path / "amass.txt"
+    cmd = build_amass_command("example.com", out)
+
+    assert "-o" not in cmd
+    assert "-oA" in cmd
+    assert cmd[cmd.index("-oA") + 1] == str(out.with_suffix(""))

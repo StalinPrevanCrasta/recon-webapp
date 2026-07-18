@@ -11,6 +11,8 @@ class RunScanRequest(BaseModel):
     subdomain_wordlist_id: int | None = None
     dirb_wordlist_id: int | None = None
     recursion_depth: int = Field(default=2, ge=0, le=5)
+    subfinder_timeout: int = Field(default=300, ge=30, le=1800)
+    amass_timeout: int = Field(default=120, ge=30, le=1800)
     extensions: str = ""
     ffuf_recursive: bool = False
     ffuf_match_codes: str = "all"
@@ -29,6 +31,8 @@ class RunScanRequest(BaseModel):
 class StageRerunRequest(BaseModel):
     stage: str
     dirb_wordlist_id: int | None = None
+    subfinder_timeout: int = 300
+    amass_timeout: int = 120
     extensions: str = ""
     ffuf_recursive: bool = False
     ffuf_match_codes: str = "all"
