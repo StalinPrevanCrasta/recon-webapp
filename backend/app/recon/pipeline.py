@@ -240,15 +240,17 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
     db.commit()
     return urls
 
-def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> None:
+def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
     settings = load_settings(); config = scan.config or {}
     resolved_wordlist = resolve_ffuf_wordlist(db, config.get("dirb_wordlist_id"))
     metadata = raw_path(scan.id, "ffuf", "wordlist")
     metadata.write_text(f"Using {resolved_wordlist.source} FFUF wordlist: {resolved_wordlist.display_name}\nPath: {resolved_wordlist.path}\n", encoding="utf-8")
     record_raw(db, scan.id, "ffuf", "ffuf-wordlist", metadata)
     urls = urls or [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500).all()]
+    stats = {"total_hosts": len(urls), "successful_hosts": 0, "failed_hosts": 0, "errors": []}
     for idx, url in enumerate(urls):
         out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url), "json")
+        cmd = None
         try:
             baseline = probe_random_paths(url, int(config.get("ffuf_baseline_count", 3)), settings.headers, settings.proxy)
             baseline_out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url) + "-baseline", "json")
@@ -258,7 +260,7 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> N
             filter_size = config.get("ffuf_filter_size") or derived_filters.get("filter_size")
             filter_words = config.get("ffuf_filter_words") or derived_filters.get("filter_words")
             filter_lines = config.get("ffuf_filter_lines") or derived_filters.get("filter_lines")
-            run_command(build_ffuf_command(
+            cmd = build_ffuf_command(
                 url,
                 resolved_wordlist.path,
                 out,
@@ -273,7 +275,8 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> N
                 bool(config.get("ffuf_auto_calibration", True)),
                 filter_words,
                 filter_lines,
-            ), timeout=int(config.get("ffuf_host_timeout", 3600)))
+            )
+            run_command(cmd, timeout=int(config.get("ffuf_host_timeout", 3600)))
             record_raw(db, scan.id, "ffuf", "ffuf", out)
             seen_keys: set[tuple] = set()
             for item in parse_ffuf_json(out.read_text(errors="ignore")):
@@ -292,9 +295,16 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> N
                 prior = db.query(models.DirbResult).filter_by(target_id=scan.target_id, normalized_path=item.get("normalized_path"), method=item.get("method")).order_by(models.DirbResult.id.asc()).first()
                 db.add(models.DirbResult(target_id=scan.target_id, scan_id=scan.id, base_url=url, first_seen_scan_id=prior.first_seen_scan_id if prior else scan.id, headers_sent=settings.headers, **item))
             db.commit()
+            stats["successful_hosts"] += 1
         except Exception as e:
-            out.write_text(json.dumps({"error": str(e)})); record_raw(db, scan.id, "ffuf", "ffuf-error", out)
-            raise
+            db.rollback()
+            stats["failed_hosts"] += 1
+            err = {"url": url, "command": cmd, "error": str(e), "error_type": type(e).__name__}
+            stats["errors"].append(err)
+            out.write_text(json.dumps(err, indent=2), encoding="utf-8")
+            record_raw(db, scan.id, "ffuf", "ffuf-error", out)
+            continue
+    return stats
 
 def run_screenshots(db: Session, scan: models.Scan) -> None:
     settings = load_settings()
@@ -324,6 +334,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
     clear_scan_raw(db, scan_id, stage_only)
     scan.started_at = datetime.now(UTC); set_scan(db, scan, stage_only or "subdomains", 5)
     try:
+        ffuf_stats = None
         if stage_only in (None, "subdomains"):
             set_scan(db, scan, "subdomains", 10); enumerate_subdomains(db, scan)
         if stage_only in (None, "httpx"):
@@ -331,10 +342,15 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         else:
             urls = scan.config.get("subset_urls") if scan.config else None
         if (scan.config or {}).get("run_ffuf", True) and stage_only in (None, "ffuf"):
-            set_scan(db, scan, "ffuf", 65); run_ffuf(db, scan, urls)
+            set_scan(db, scan, "ffuf", 65); ffuf_stats = run_ffuf(db, scan, urls)
         if (scan.config or {}).get("run_screenshots", True) and stage_only in (None, "screenshots"):
             set_scan(db, scan, "screenshots", 85); run_screenshots(db, scan)
-        scan.finished_at = datetime.now(UTC); set_scan(db, scan, "complete", 100, "complete")
+        scan.finished_at = datetime.now(UTC)
+        if ffuf_stats and ffuf_stats.get("failed_hosts"):
+            error = f"FFUF had {ffuf_stats['failed_hosts']} host failure(s); {ffuf_stats.get('successful_hosts', 0)} host(s) completed."
+            set_scan(db, scan, "partial", 100, "partial", error)
+        else:
+            set_scan(db, scan, "complete", 100, "complete")
     except Exception as e:
         progress = getattr(scan, "progress", 0) or 0
         db.rollback()

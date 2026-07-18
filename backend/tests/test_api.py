@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from uuid import uuid4
+from pathlib import Path
 
 from app import models
 from app.db import SessionLocal, init_db
@@ -65,3 +66,34 @@ def test_delete_target_removes_target_scans_and_results():
         assert db.get(models.Scan, scan_id) is None
     finally:
         db.close()
+
+
+
+def test_raw_output_endpoint_returns_log_contents(tmp_path):
+    init_db()
+    db = SessionLocal()
+    raw_file = tmp_path / "ffuf-error.json"
+    raw_file.write_text('{"error":"timeout","command":["ffuf"]}', encoding="utf-8")
+    try:
+        target = models.Target(domain=f"raw-{uuid4().hex}.example")
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+        scan = models.Scan(target_id=target.id, status="failed", stage="failed", config={})
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        raw = models.RawOutput(scan_id=scan.id, stage="ffuf", tool="ffuf-error", path=str(raw_file))
+        db.add(raw)
+        db.commit()
+        db.refresh(raw)
+        raw_id = raw.id
+    finally:
+        db.close()
+
+    response = TestClient(app).get(f"/api/raw/{raw_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool"] == "ffuf-error"
+    assert body["content"] == '{"error":"timeout","command":["ffuf"]}'

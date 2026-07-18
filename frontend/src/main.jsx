@@ -154,25 +154,34 @@ function SummaryCards({result}) {
 function ProgressPanel({scan, result}) {
   const stage = scan?.stage || 'queued';
   const status = scan?.status || 'idle';
+  const stageInfo = result?.stage_statuses || {};
   const totalHosts = result?.subdomains?.length || 0;
   const liveHosts = result?.http?.length || 0;
-  const dirCount = result?.dirs?.length || 0;
+  const dirs = result?.dirs || [];
+  const confirmed = dirs.filter(d => d.confidence === 'confirmed').length;
+  const possible = dirs.filter(d => d.confidence === 'possible').length;
+  const filtered = dirs.filter(d => d.confidence === 'filtered').length;
   const screenshotCount = result?.screenshots?.length || 0;
   const stages = [
     ['subdomains', 'Subdomains', `${totalHosts}/${totalHosts || '—'}`],
     ['httpx', 'Httpx', `${liveHosts}/${totalHosts || '—'}`],
-    ['ffuf', 'FFUF', `${dirCount} paths`],
+    ['ffuf', 'FFUF', `${stageInfo.ffuf?.successful_hosts || 0}/${stageInfo.ffuf?.total || liveHosts || '—'} hosts · ${confirmed} confirmed · ${possible} possible · ${filtered} filtered · ${stageInfo.ffuf?.failed_hosts || 0} failed`],
     ['screenshots', 'Gowitness', `${screenshotCount} shots`],
   ];
-  const activeIndex = stages.findIndex(([key]) => stage.includes(key));
-  const complete = status === 'complete';
   return <div className="progress-panel">
-    <div className="panel-title"><span>Recon Progress</span><Badge tone={status === 'failed' ? 'server' : complete ? 'ok' : 'redirect'}>{status}</Badge></div>
-    <div className="stage-list">{stages.map(([key, label], idx) => {
-      const done = complete || idx < activeIndex;
-      const active = idx === activeIndex && !complete;
-      return <div key={key} className={`stage ${done ? 'done' : ''} ${active ? 'active' : ''}`}><span>{done ? '✓' : active ? '●' : '○'}</span><b>{label}</b><em>{stages[idx][2]}</em><small>{done ? `Completed in ${fmtDuration(scan)}` : active ? 'Running…' : 'Queued'}</small></div>;
+    <div className="panel-title"><span>Recon Progress</span><Badge tone={status === 'failed' ? 'server' : status === 'partial' ? 'warn' : status === 'complete' ? 'ok' : 'redirect'}>{status}</Badge></div>
+    <div className="stage-list">{stages.map(([key, label, text]) => {
+      const info = stageInfo[key] || {};
+      const state = info.status || (stage.includes(key) && status === 'running' ? 'running' : 'not_started');
+      const done = state === 'complete';
+      const active = state === 'running';
+      const partial = state === 'partial';
+      const failed = state === 'failed';
+      const marker = done ? '✓' : partial ? '◐' : failed ? '!' : active ? '●' : '○';
+      const labelText = done ? 'Complete' : partial ? 'Partial' : failed ? 'Failed' : active ? 'Running…' : 'Not started';
+      return <div key={key} className={`stage ${done ? 'done' : ''} ${active ? 'active' : ''} ${partial ? 'partial' : ''} ${failed ? 'failed' : ''}`}><span>{marker}</span><b>{label}</b><em>{text}</em><small>{labelText}</small></div>;
     })}</div>
+    {scan?.error && <div className="inline-alert">{scan.error}</div>}
     <div className="elapsed">Elapsed: {fmtDuration(scan)} · Started: {ago(scan?.started_at || scan?.created_at)}</div>
     <div className="bar"><span style={{width: `${scan?.progress || 0}%`}} /></div>
   </div>;
@@ -251,7 +260,12 @@ function ScreenshotGallery({rows, selectRow, markInteresting}) {
 }
 
 function RawConsole({rows}) {
-  return <div className="console"><div className="console-title">Live / Raw Output</div>{rows.length ? rows.map(r => <div key={r.id} className="logline"><span>[{r.tool}]</span> {r.stage} · {r.path}</div>) : <div className="logline muted">No raw output yet. Logs will appear after stages complete.</div>}</div>;
+  const [open, setOpen] = useState(null);
+  async function toggle(row) {
+    if (open?.id === row.id) { setOpen(null); return; }
+    try { setOpen(await j(`${API}/raw/${row.id}`)); } catch (err) { setOpen({id: row.id, content: err.message || String(err)}); }
+  }
+  return <div className="console"><div className="console-title">Live / Raw Output</div>{rows.length ? rows.map(r => <div key={r.id} className="logwrap"><div className="logline"><span>[{r.tool}]</span> {r.stage} · {r.path}<button onClick={() => toggle(r)}>Open log</button></div>{open?.id === r.id && <pre className="logcontent">{open.content}{open.truncated ? '\n...[truncated]' : ''}</pre>}</div>) : <div className="logline muted">No raw output yet. Logs will appear after stages complete.</div>}</div>;
 }
 
 function DetailsPanel({row, result, close, markInteresting}) {

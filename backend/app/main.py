@@ -130,6 +130,29 @@ def delete_target(target_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"ok": True, "deleted": deleted}
 
+
+
+def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list, dirs: list, screenshots: list, raw: list) -> dict:
+    raw_by_stage = {}
+    for r in raw:
+        raw_by_stage.setdefault(r.stage, []).append(r)
+    def stage_state(stage: str, result_count: int) -> str:
+        if scan.stage == stage and scan.status == "running":
+            return "running"
+        if any(r.tool.endswith("error") for r in raw_by_stage.get(stage, [])):
+            return "partial" if result_count else "failed"
+        if result_count or raw_by_stage.get(stage):
+            return "complete"
+        return "not_started"
+    ffuf_errors = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf-error"]
+    ffuf_success = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf"]
+    return {
+        "subdomains": {"status": stage_state("subdomains", len(subdomains)), "results": len(subdomains)},
+        "httpx": {"status": stage_state("httpx", len(http)), "results": len(http), "total": len(subdomains)},
+        "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status == "running" else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": len(ffuf_success), "failed_hosts": len(ffuf_errors), "total": len(http)},
+        "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots)},
+    }
+
 @app.get("/api/targets/{target_id}/results")
 def results(target_id: int, scan_id: int | None = None, db: Session = Depends(get_db)):
     target = db.get(models.Target, target_id)
@@ -142,16 +165,35 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     prev = db.query(models.Scan).filter(models.Scan.target_id == target_id, models.Scan.id < scan.id).order_by(models.Scan.id.desc()).first()
     def rowdict(row, keys):
         d = {k: getattr(row, k) for k in keys}; d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id and bool(prev); return d
+    subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()]
+    http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "response_size", "server", "redirect_chain", "ip", "headers_sent", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()]
+    dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()]
+    screenshots = [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()]
+    raw_rows = db.query(models.RawOutput).filter_by(scan_id=scan.id).all()
+    raw = [{"id": r.id, "stage": r.stage, "tool": r.tool, "path": r.path} for r in raw_rows]
     return {
         "target": {"id": target.id, "domain": target.domain},
         "scans": [{"id": s.id, "status": s.status, "stage": s.stage, "progress": s.progress, "created_at": s.created_at} for s in scans_q.all()],
         "active_scan": {"id": scan.id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error},
-        "subdomains": [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()],
-        "http": [rowdict(r, ["id", "url", "status_code", "title", "tech", "response_size", "server", "redirect_chain", "ip", "headers_sent", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()],
-        "dirs": [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()],
-        "screenshots": [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()],
-        "raw": [{"id": r.id, "stage": r.stage, "tool": r.tool, "path": r.path} for r in db.query(models.RawOutput).filter_by(scan_id=scan.id).all()],
+        "stage_statuses": stage_statuses(db, scan, subdomains, http, dirs, screenshots, raw_rows),
+        "subdomains": subdomains,
+        "http": http,
+        "dirs": dirs,
+        "screenshots": screenshots,
+        "raw": raw,
     }
+
+
+@app.get("/api/raw/{raw_id}")
+def raw_output(raw_id: int, db: Session = Depends(get_db)):
+    row = db.get(models.RawOutput, raw_id)
+    if not row:
+        raise HTTPException(404, "raw output not found")
+    path = Path(row.path)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "raw output file not found")
+    content = path.read_text(errors="replace")
+    return {"id": row.id, "stage": row.stage, "tool": row.tool, "path": row.path, "content": content[:200000], "truncated": len(content) > 200000}
 
 MODEL_MAP = {"subdomains": models.Subdomain, "http": models.HttpxResult, "dirs": models.DirbResult, "screenshots": models.Screenshot}
 @app.patch("/api/{kind}/{item_id}/interesting")

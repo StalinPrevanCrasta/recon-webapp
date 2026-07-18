@@ -168,3 +168,58 @@ def test_execute_scan_clears_stale_raw_files_for_reused_scan_id(monkeypatch, tmp
         assert (tmp_path / "raw" / f"scan-{scan_id}").exists()
     finally:
         db.close()
+
+
+
+def test_ffuf_host_failure_is_recorded_and_next_host_continues(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"run_ffuf": True, "ffuf_host_timeout": 30})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://one.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://two.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "probe_random_paths", lambda *a, **k: [])
+    monkeypatch.setattr(pipeline, "resolve_ffuf_wordlist", lambda db, selected_wordlist_id: type("R", (), {"path": tmp_path / "common.txt", "source": "default", "display_name": "common.txt"})())
+    (tmp_path / "common.txt").write_text("admin\n", encoding="utf-8")
+    calls = []
+
+    def fake_run_command(cmd, timeout=None):
+        calls.append(cmd)
+        out = Path(cmd[cmd.index("-o") + 1])
+        if "one.example" in cmd[cmd.index("-u") + 1]:
+            raise TimeoutError("host timed out")
+        out.write_text('{"results":[{"url":"https://two.example/admin","status":200,"length":10,"words":1,"lines":1}]}', encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_ffuf(db, scan)
+        assert stats["failed_hosts"] == 1
+        assert stats["successful_hosts"] == 1
+        assert db.query(models.DirbResult).filter_by(scan_id=scan.id).count() == 1
+        raw_tools = [r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id).all()]
+        assert "ffuf-error" in raw_tools
+        assert len(calls) == 2
+    finally:
+        db.close()
+
+
+def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_host_failures(monkeypatch):
+    db, _, scan = make_scan({"run_ffuf": True, "run_screenshots": True})
+    scan_id = scan.id
+    db.close()
+    events = []
+    monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: events.append("subdomains") or ["a.example"])
+    monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
+    monkeypatch.setattr(pipeline, "run_ffuf", lambda db, scan, urls=None: events.append("ffuf") or {"successful_hosts": 0, "failed_hosts": 1, "errors": [{"url": "https://a.example", "error": "timeout"}]})
+    monkeypatch.setattr(pipeline, "run_screenshots", lambda db, scan: events.append("screenshots"))
+
+    db = SessionLocal()
+    try:
+        pipeline.execute_scan(db, scan_id)
+        row = db.get(models.Scan, scan_id)
+        assert events == ["subdomains", "httpx", "ffuf", "screenshots"]
+        assert row.status == "partial"
+        assert row.stage == "partial"
+        assert "FFUF had 1 host failure" in row.error
+    finally:
+        db.close()
