@@ -193,7 +193,7 @@ function Header({domain, setDomain, run, result, targets, loadTarget, runDisable
   const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} content paths`;
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
-    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix Options' : 'Run Recon'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
+    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>▣ View Logs</button><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix Options' : 'Run Recon'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
   </header>;
 }
 
@@ -281,6 +281,96 @@ function DetailsPanel({row, result, close, markInteresting}) {
   return <aside className="details"><button className="close" onClick={close}>×</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>🌐 Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>📋 Copy URL</button><button>📸 Screenshot</button><button>🔍 Whois</button><button>⚡ Run Nuclei</button><button>🕷 Crawl</button><button onClick={() => markInteresting(row.kind, row)}>⭐ Bookmark</button></div></aside>;
 }
 
+
+function useContainerLogs({container, tail, paused, bufferLimit = 10000}) {
+  const [lines, setLines] = useState([]);
+  const [pending, setPending] = useState(0);
+  const [status, setStatus] = useState('Disconnected');
+  const [error, setError] = useState('');
+  const pausedRef = React.useRef(paused);
+  const reconnectRef = React.useRef(0);
+  useEffect(() => { pausedRef.current = paused; }, [paused]);
+  useEffect(() => {
+    let source;
+    let closed = false;
+    let retryTimer;
+    let staged = [];
+    function append(line) {
+      if (pausedRef.current) { staged.push(line); setPending(staged.length); return; }
+      if (staged.length) { line = staged.splice(0).concat(line); setPending(0); }
+      const add = Array.isArray(line) ? line : [line];
+      setLines(prev => prev.concat(add).slice(-bufferLimit));
+    }
+    function connect() {
+      setStatus(reconnectRef.current ? 'Reconnecting' : 'Connecting');
+      source = new EventSource(`${API}/system/logs/stream?container=${encodeURIComponent(container)}&tail=${encodeURIComponent(tail)}`);
+      source.addEventListener('ready', () => { reconnectRef.current = 0; setStatus('Connected'); setError(''); });
+      source.addEventListener('heartbeat', () => setStatus('Connected'));
+      source.addEventListener('log', event => { try { append(JSON.parse(event.data)); } catch { append({timestamp: new Date().toISOString(), container: 'unknown', level: 'ERROR', message: 'Malformed log line'}); } });
+      source.addEventListener('error', event => {
+        setStatus('Reconnecting');
+        if (event.data) { try { setError(JSON.parse(event.data).message || 'Log stream error'); } catch { setError('Log stream error'); } }
+        source?.close();
+        if (!closed) {
+          const delay = Math.min(30000, 1000 * (2 ** reconnectRef.current++));
+          retryTimer = setTimeout(connect, delay);
+        }
+      });
+    }
+    connect();
+    return () => { closed = true; clearTimeout(retryTimer); source?.close(); setStatus('Disconnected'); };
+  }, [container, tail, bufferLimit]);
+  return {lines, setLines, pending, status, error};
+}
+
+function levelTone(level) {
+  if (level === 'ERROR' || level === 'CRITICAL') return 'server';
+  if (level === 'WARNING') return 'warn';
+  if (level === 'DEBUG') return 'muted';
+  return 'ok';
+}
+
+function highlight(text, q) {
+  if (!q) return text;
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return text;
+  return <>{text.slice(0, idx)}<mark>{text.slice(idx, idx + q.length)}</mark>{text.slice(idx + q.length)}</>;
+}
+
+function formatLogLine(line) {
+  return `${line.timestamp || ''} ${line.container || ''} ${line.level || ''} ${line.message || ''}`;
+}
+
+function LogsPage() {
+  const [containers, setContainers] = useState([]);
+  const [container, setContainer] = useState(localStorage.getItem('logs.container') || 'all');
+  const [paused, setPaused] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(localStorage.getItem('logs.autoscroll') !== 'false');
+  const [query, setQuery] = useState('');
+  const [level, setLevel] = useState('All');
+  const [tail, setTail] = useState(Number(localStorage.getItem('logs.tail') || 200));
+  const [jump, setJump] = useState(false);
+  const {lines, setLines, pending, status, error} = useContainerLogs({container, tail, paused, bufferLimit: 10000});
+  const endRef = React.useRef(null);
+  const scrollerRef = React.useRef(null);
+  useEffect(() => { j(`${API}/system/logs/containers`).then(r => setContainers(r.containers || [])).catch(e => setContainers([{id: 'unavailable', display_name: e.message, status: 'error'}])); }, []);
+  useEffect(() => { localStorage.setItem('logs.container', container); }, [container]);
+  useEffect(() => { localStorage.setItem('logs.autoscroll', String(autoScroll)); }, [autoScroll]);
+  useEffect(() => { localStorage.setItem('logs.tail', String(tail)); }, [tail]);
+  useEffect(() => { if (autoScroll && !paused) endRef.current?.scrollIntoView({block: 'end'}); }, [lines, autoScroll, paused]);
+  const visible = lines.filter(l => (container === 'all' || l.container === container) && (level === 'All' || l.level === level) && (!query || formatLogLine(l).toLowerCase().includes(query.toLowerCase())));
+  const rendered = visible.slice(-1000);
+  function copyVisible() { navigator.clipboard?.writeText(visible.map(formatLogLine).join('\n')); }
+  function downloadVisible() { const blob = new Blob([visible.map(formatLogLine).join('\n')], {type: 'text/plain'}); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `container-logs-${container}.txt`; a.click(); URL.revokeObjectURL(a.href); }
+  function onScroll() { const el = scrollerRef.current; if (!el) return; const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48; if (!nearBottom) { setAutoScroll(false); setJump(true); } else setJump(false); }
+  function reconnect() { window.location.reload(); }
+  return <div className="logs-page"><div className="logs-toolbar"><div><h1>Live Container Logs</h1><p>Docker Compose infrastructure logs. Content is redacted server-side and rendered as plain text.</p></div><Badge tone={status === 'Connected' ? 'ok' : status === 'Reconnecting' ? 'warn' : 'server'}>{status}</Badge><button onClick={reconnect}>Reconnect</button></div>
+    {error && <div className="inline-alert">{error}</div>}
+    <div className="logs-toolbar sticky"><label>Container <select value={container} onChange={e => setContainer(e.target.value)}><option value="all">All containers</option>{containers.map(c => <option key={c.id} value={c.id}>{c.display_name} ({c.status})</option>)}</select></label><input className="wide" placeholder="Search/filter logs" value={query} onChange={e => setQuery(e.target.value)}/><label>Level <select value={level} onChange={e => setLevel(e.target.value)}>{['All','DEBUG','INFO','WARNING','ERROR','CRITICAL'].map(x => <option key={x}>{x}</option>)}</select></label><label>Tail <input type="number" min="0" max="2000" value={tail} onChange={e => setTail(Math.min(2000, Math.max(0, Number(e.target.value) || 0)))}/></label><button onClick={() => setPaused(!paused)}>{paused ? `Resume${pending ? ` (${pending})` : ''}` : 'Pause'}</button><button onClick={() => setLines([])}>Clear</button><label><input type="checkbox" checked={autoScroll} onChange={e => setAutoScroll(e.target.checked)}/> Auto-scroll</label><button onClick={copyVisible}>Copy visible logs</button><button onClick={downloadVisible}>Download</button><span>{visible.length} visible / {lines.length} buffered</span></div>
+    <div className="logs-shell" ref={scrollerRef} onScroll={onScroll}>{rendered.map((line, idx) => <div className={`container-log-line c-${line.container}`} key={`${line.timestamp}-${idx}`}><span className="log-time">{line.timestamp}</span><span className="container-badge">{line.container}</span><Badge tone={levelTone(line.level)}>{line.level}</Badge><span className="log-message">{highlight(line.message || '', query)}</span></div>)}<div ref={endRef}/></div>{jump && <button className="jump-latest" onClick={() => { setAutoScroll(true); setJump(false); endRef.current?.scrollIntoView(); }}>Jump to latest</button>}
+  </div>;
+}
+
 function App() {
   const [domain, setDomain] = useState('');
   const [targets, setTargets] = useState([]);
@@ -363,4 +453,4 @@ function App() {
   </div>;
 }
 
-createRoot(document.getElementById('root')).render(<App/>);
+createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : <App/>);

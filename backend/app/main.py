@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
 from app.recon.wordlists import FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
+from app.docker_logs import LOG_VIEWER_DISABLED, list_allowed_containers, stream_logs, validate_container_selection, viewer_enabled, clamp_tail
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 WORDLIST_DIR = DATA_DIR / "wordlists"
@@ -35,6 +36,23 @@ app.mount("/screenshots", StaticFiles(directory=str(SCREEN_DIR), check_dir=False
 @app.get("/api/health")
 def health(db: Session = Depends(get_db)):
     return {"ok": True, "ffuf": ffuf_wordlist_status(db)}
+
+@app.get("/api/system/logs/containers")
+def docker_log_containers():
+    if not viewer_enabled():
+        raise HTTPException(403, LOG_VIEWER_DISABLED)
+    return {"containers": list_allowed_containers()}
+
+@app.get("/api/system/logs/stream")
+def docker_log_stream(container: str = "all", tail: int = 200):
+    if not viewer_enabled():
+        raise HTTPException(403, LOG_VIEWER_DISABLED)
+    try:
+        validate_container_selection(container)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(stream_logs(container, clamp_tail(tail)), media_type="text/event-stream", headers=headers)
 
 @app.get("/api/settings", response_model=Settings)
 def get_settings():
