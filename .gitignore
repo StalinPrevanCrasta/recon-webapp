@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 *.pyc
 wordlists/
+!backend/wordlists/
+backend/wordlists/*
+!backend/wordlists/default/
+!backend/wordlists/default/common.txt
 screenshots/
 raw-output/
 *.db

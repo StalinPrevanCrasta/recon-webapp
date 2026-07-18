@@ -79,11 +79,11 @@ def parse_ffuf_json(text: str) -> list[dict]:
     return rows
 
 def build_gowitness_command(input_file: Path, output_dir: Path, user_agent: str | None = None, proxy: str | None = None) -> list[str]:
-    cmd = ["gowitness", "scan", "file", "-f", str(input_file), "--screenshot-path", str(output_dir), "--write-jsonl"]
+    cmd = ["gowitness", "scan", "file", "-f", str(input_file), "--screenshot-path", str(output_dir), "--screenshot-format", "png", "--write-jsonl"]
     if user_agent:
-        cmd.extend(["--user-agent", user_agent])
+        cmd.extend(["--chrome-user-agent", user_agent])
     if proxy:
-        cmd.extend(["--proxy", proxy])
+        cmd.extend(["--chrome-proxy", proxy])
     return cmd
 
 def build_subfinder_command(domain: str, output_file: Path) -> list[str]:

@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx as pyhttpx
@@ -12,6 +12,7 @@ from app.recon.wrappers import (
     build_amass_command, build_ffuf_command, build_gowitness_command, build_httpx_command,
     build_puredns_command, build_subfinder_command, parse_ffuf_json, parse_httpx_jsonl,
 )
+from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
 
 DATA_DIR = Path(__import__('os').getenv("RECON_DATA_DIR", "/data"))
@@ -22,6 +23,11 @@ DEFAULT_RESOLVERS = DATA_DIR / "resolvers.txt"
 
 def clean_domain(domain: str) -> str:
     return domain.strip().lower().removeprefix("http://").removeprefix("https://").split('/')[0]
+
+def is_subdomain_of(name: str, domain: str) -> bool:
+    name = name.strip().lower().rstrip('.')
+    domain = domain.strip().lower().rstrip('.')
+    return name == domain or name.endswith("." + domain)
 
 def set_scan(db: Session, scan: models.Scan, stage: str, progress: int, status: str = "running", error: str | None = None) -> None:
     scan.stage = stage
@@ -60,7 +66,7 @@ def crtsh(domain: str) -> set[str]:
         for item in r.json():
             for name in str(item.get("name_value", "")).splitlines():
                 name = name.replace("*.", "").strip().lower()
-                if name.endswith(domain):
+                if is_subdomain_of(name, domain):
                     out.add(name)
         return out
     except Exception:
@@ -70,7 +76,7 @@ def mutate_names(names: set[str], domain: str) -> set[str]:
     words = ["dev", "stage", "staging", "test", "uat", "prod", "admin", "api", "internal"]
     out: set[str] = set()
     for name in names:
-        if not name.endswith(domain):
+        if not is_subdomain_of(name, domain):
             continue
         left = name[: -(len(domain) + 1)] if name != domain else ""
         first = left.split('.')[0] if left else ""
@@ -155,15 +161,15 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
 
 def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> None:
     settings = load_settings(); config = scan.config or {}
-    wid = config.get("dirb_wordlist_id")
-    wordlist = db.get(models.Wordlist, wid) if wid else None
-    if not wordlist:
-        return
+    resolved_wordlist = resolve_ffuf_wordlist(db, config.get("dirb_wordlist_id"))
+    metadata = raw_path(scan.id, "ffuf", "wordlist")
+    metadata.write_text(f"Using {resolved_wordlist.source} FFUF wordlist: {resolved_wordlist.display_name}\nPath: {resolved_wordlist.path}\n", encoding="utf-8")
+    record_raw(db, scan.id, "ffuf", "ffuf-wordlist", metadata)
     urls = urls or [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500).all()]
     for idx, url in enumerate(urls):
         out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url), "json")
         try:
-            run_command(build_ffuf_command(url, Path(wordlist.path), out, config.get("extensions", ""), bool(config.get("ffuf_recursive", False)), config.get("ffuf_match_codes", "200,204,301,302,307,401,403"), config.get("ffuf_filter_size"), int(config.get("ffuf_threads", 25)), config.get("ffuf_rate"), settings.headers, settings.proxy), timeout=3600)
+            run_command(build_ffuf_command(url, resolved_wordlist.path, out, config.get("extensions", ""), bool(config.get("ffuf_recursive", False)), config.get("ffuf_match_codes", "200,204,301,302,307,401,403"), config.get("ffuf_filter_size"), int(config.get("ffuf_threads", 25)), config.get("ffuf_rate"), settings.headers, settings.proxy), timeout=3600)
             record_raw(db, scan.id, "ffuf", "ffuf", out)
             for item in parse_ffuf_json(out.read_text(errors="ignore")):
                 if not item.get("url"):
@@ -173,6 +179,7 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> N
             db.commit()
         except Exception as e:
             out.write_text(json.dumps({"error": str(e)})); record_raw(db, scan.id, "ffuf", "ffuf-error", out)
+            raise
 
 def run_screenshots(db: Session, scan: models.Scan) -> None:
     settings = load_settings()
@@ -188,7 +195,9 @@ def run_screenshots(db: Session, scan: models.Scan) -> None:
     except Exception as e:
         err = raw_path(scan.id, "screenshots", "gowitness-error")
         err.write_text(str(e)); record_raw(db, scan.id, "screenshots", "gowitness-error", err)
-    for image in outdir.glob("*.png"):
+        raise
+    images = list(outdir.glob("*.png")) + list(outdir.glob("*.jpg")) + list(outdir.glob("*.jpeg"))
+    for image in images:
         stem = image.stem.replace("_", "://", 1) if "_" in image.stem else image.stem
         db.add(models.Screenshot(target_id=scan.target_id, scan_id=scan.id, url=stem, image_path=str(image)))
     db.commit()
@@ -197,7 +206,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
     scan = db.get(models.Scan, scan_id)
     if not scan:
         return
-    scan.started_at = datetime.utcnow(); set_scan(db, scan, stage_only or "subdomains", 5)
+    scan.started_at = datetime.now(UTC); set_scan(db, scan, stage_only or "subdomains", 5)
     try:
         if stage_only in (None, "subdomains"):
             set_scan(db, scan, "subdomains", 10); enumerate_subdomains(db, scan)
@@ -209,6 +218,6 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             set_scan(db, scan, "ffuf", 65); run_ffuf(db, scan, urls)
         if (scan.config or {}).get("run_screenshots", True) and stage_only in (None, "screenshots"):
             set_scan(db, scan, "screenshots", 85); run_screenshots(db, scan)
-        scan.finished_at = datetime.utcnow(); set_scan(db, scan, "complete", 100, "complete")
+        scan.finished_at = datetime.now(UTC); set_scan(db, scan, "complete", 100, "complete")
     except Exception as e:
-        scan.finished_at = datetime.utcnow(); set_scan(db, scan, "failed", scan.progress, "failed", str(e))
+        scan.finished_at = datetime.now(UTC); set_scan(db, scan, "failed", scan.progress, "failed", str(e))

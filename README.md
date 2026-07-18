@@ -37,6 +37,28 @@ Docker volumes/bind mounts persist data across restarts:
 
 The backend image installs: `subfinder`, `amass`, `httpx`, `ffuf`, `gowitness`, `puredns`, `massdns`, and `shuffledns`.
 
+## Default FFUF wordlist
+
+FFUF uses the selected uploaded dirb wordlist first. If no dirb wordlist is selected, the backend resolves a default wordlist in this order:
+
+1. `DEFAULT_FFUF_WORDLIST`
+2. bundled `/app/wordlists/default/common.txt`
+
+Default environment value:
+
+```env
+DEFAULT_FFUF_WORDLIST=/usr/share/seclists/Discovery/Web-Content/common.txt
+```
+
+The backend/worker Docker image installs SecLists so `/usr/share/seclists/Discovery/Web-Content/common.txt` is available in both containers. If neither the configured default nor bundled fallback exists, FFUF scans are rejected with a clear validation error instead of being silently skipped.
+
+Rebuild after changing Docker defaults:
+
+```bash
+docker compose build backend worker
+docker compose up -d --no-build --force-recreate backend worker frontend
+```
+
 ## Workflow
 
 See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the full operating guide. Short version:

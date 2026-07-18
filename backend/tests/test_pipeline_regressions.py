@@ -1,0 +1,107 @@
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app import models
+from app.db import SessionLocal, init_db
+from app.main import app
+from app.recon import pipeline
+from app.recon import wordlists as wordlist_resolver
+from app.recon.wrappers import build_gowitness_command
+
+
+def make_scan(config=None):
+    init_db()
+    db = SessionLocal()
+    domain = f"regression-{uuid4().hex}.example"
+    target = models.Target(domain=domain)
+    db.add(target)
+    db.commit()
+    db.refresh(target)
+    scan = models.Scan(target_id=target.id, status="queued", stage="queued", config=config or {})
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+    return db, target, scan
+
+
+def test_scan_request_rejects_ffuf_enabled_without_dirb_wordlist(monkeypatch):
+    monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", Path("/missing/bundled/common.txt"))
+    client = TestClient(app)
+
+    response = client.post("/api/scans/run", json={"domain": f"reject-{uuid4().hex}.example", "run_ffuf": True})
+
+    assert response.status_code == 422
+    assert "FFUF is enabled, but no selected or default directory wordlist is available." in response.text
+
+
+def test_pipeline_rejects_ffuf_enabled_without_dirb_wordlist(monkeypatch):
+    monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", Path("/missing/bundled/common.txt"))
+    db, _, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None})
+    try:
+        with pytest.raises(ValueError, match="FFUF is enabled, but no selected or default directory wordlist is available"):
+            pipeline.run_ffuf(db, scan, ["https://a.example"])
+    finally:
+        db.close()
+
+
+def test_execute_scan_records_failure_when_ffuf_validation_fails(monkeypatch):
+    monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", Path("/missing/bundled/common.txt"))
+    db, _, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None, "run_screenshots": False})
+    scan_id = scan.id
+    db.close()
+
+    monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: ["a.example"])
+    monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: ["https://a.example"])
+
+    db = SessionLocal()
+    try:
+        pipeline.execute_scan(db, scan_id)
+        failed = db.get(models.Scan, scan_id)
+        assert failed.status == "failed"
+        assert failed.stage == "failed"
+        assert "FFUF is enabled, but no selected or default directory wordlist is available." in failed.error
+    finally:
+        db.close()
+
+
+def test_gowitness_uses_current_chrome_flags_and_png_format(tmp_path):
+    cmd = build_gowitness_command(tmp_path / "urls.txt", tmp_path / "shots", "agent/1.0", "http://proxy:8080")
+
+    assert "--chrome-user-agent" in cmd
+    assert "agent/1.0" in cmd
+    assert "--chrome-proxy" in cmd
+    assert "http://proxy:8080" in cmd
+    assert "--screenshot-format" in cmd
+    assert "png" in cmd
+    assert "--user-agent" not in cmd
+    assert "--proxy" not in cmd
+
+
+def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"run_screenshots": True})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://a.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "SCREEN_DIR", tmp_path / "screenshots")
+
+    def fake_run_command(cmd, timeout=None):
+        outdir = Path(cmd[cmd.index("--screenshot-path") + 1])
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "https_a.example.png").write_bytes(b"png")
+        (outdir / "https_b.example.jpg").write_bytes(b"jpg")
+        (outdir / "https_c.example.jpeg").write_bytes(b"jpeg")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+
+    try:
+        pipeline.run_screenshots(db, scan)
+        rows = db.query(models.Screenshot).filter_by(scan_id=scan.id).all()
+        assert len(rows) == 3
+        assert {Path(r.image_path).suffix for r in rows} == {".png", ".jpg", ".jpeg"}
+    finally:
+        db.close()

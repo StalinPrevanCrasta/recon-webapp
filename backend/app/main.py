@@ -15,6 +15,7 @@ from app.schemas import InterestingPatch, RunScanRequest, Settings, StageRerunRe
 from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
+from app.recon.wordlists import FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 WORDLIST_DIR = DATA_DIR / "wordlists"
@@ -32,8 +33,8 @@ def startup():
 app.mount("/screenshots", StaticFiles(directory=str(SCREEN_DIR), check_dir=False), name="screenshots")
 
 @app.get("/api/health")
-def health():
-    return {"ok": True}
+def health(db: Session = Depends(get_db)):
+    return {"ok": True, "ffuf": ffuf_wordlist_status(db)}
 
 @app.get("/api/settings", response_model=Settings)
 def get_settings():
@@ -65,6 +66,11 @@ async def upload_wordlist(kind: str, file: UploadFile = File(...), db: Session =
 
 @app.post("/api/scans/run")
 def run_scan(req: RunScanRequest, db: Session = Depends(get_db)):
+    if req.run_ffuf:
+        try:
+            resolve_ffuf_wordlist(db, req.dirb_wordlist_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=FFUF_WORDLIST_UNAVAILABLE)
     domain = clean_domain(req.domain)
     target = db.query(models.Target).filter_by(domain=domain).one_or_none()
     if not target:
@@ -76,6 +82,11 @@ def run_scan(req: RunScanRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/scans/{scan_id}/rerun")
 def rerun_stage(scan_id: int, req: StageRerunRequest, db: Session = Depends(get_db)):
+    if req.stage == "ffuf":
+        try:
+            resolve_ffuf_wordlist(db, req.dirb_wordlist_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=FFUF_WORDLIST_UNAVAILABLE)
     parent = db.get(models.Scan, scan_id)
     if not parent:
         raise HTTPException(404, "scan not found")

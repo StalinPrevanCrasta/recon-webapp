@@ -75,6 +75,8 @@ config
 
 After upload, each wordlist appears in its dropdown. Select the wordlist before starting the scan.
 
+If **Run directory discovery** is enabled, the app resolves the FFUF wordlist in this order: selected uploaded dirb wordlist, `DEFAULT_FFUF_WORDLIST`, then the bundled default at `/app/wordlists/default/common.txt`. With the Docker defaults, **SecLists common.txt** is used automatically when no uploaded dirb wordlist is selected. The API returns HTTP 422 only when FFUF is enabled and no selected, default, or bundled wordlist is usable.
+
 ### 2. Configure Request Settings
 
 Use the **Settings** section in the left sidebar.
@@ -114,7 +116,7 @@ example.com
 Do not include paths. The app normalizes simple `http://` or `https://` input, but domain-only input is preferred.
 
 2. Select a **subdomain wordlist** from the sidebar.
-3. Select a **dirb wordlist** if you want FFUF to run.
+3. Select a **dirb wordlist** if you want to override the default SecLists `common.txt` FFUF wordlist.
 4. Configure FFUF options if needed.
 5. Click **Run Recon**.
 

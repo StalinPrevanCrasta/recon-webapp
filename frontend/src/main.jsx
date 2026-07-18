@@ -6,9 +6,13 @@ const API = '/api';
 const TABS = ['Subdomains', 'Live Hosts', 'Directories', 'Screenshots', 'Raw Logs'];
 
 async function j(url, options = {}) {
-  const r = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  const isForm = options.body instanceof FormData;
+  const headers = isForm ? (options.headers || {}) : {'Content-Type': 'application/json', ...(options.headers || {})};
+  const r = await fetch(url, {...options, headers});
+  const contentType = r.headers.get('content-type') || '';
+  const body = contentType.includes('application/json') ? await r.json() : await r.text();
+  if (!r.ok) throw new Error(body?.detail || body || `Request failed: ${r.status}`);
+  return body;
 }
 
 function usePoll(scanId, onTick) {
@@ -168,13 +172,13 @@ function ProgressPanel({scan, result}) {
   </div>;
 }
 
-function Header({domain, setDomain, run, result, targets, loadTarget}) {
+function Header({domain, setDomain, run, result, targets, loadTarget, runDisabled, runError}) {
   const scan = result?.active_scan;
   const target = result?.target?.domain || 'No target selected';
   const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} directories`;
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
-    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="primary" onClick={run}>Run Recon</button></div>
+    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix Options' : 'Run Recon'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
   </header>;
 }
 
@@ -265,22 +269,29 @@ function App() {
   const [tab, setTab] = useState('Subdomains');
   const [settings, setSettings] = useState(null);
   const [wordlists, setWordlists] = useState([]);
+  const [health, setHealth] = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [detail, setDetail] = useState(null);
+  const [alert, setAlert] = useState('');
   const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 25, ffuf_match_codes: '200,204,301,302,307,401,403', ffuf_recursive: false, run_ffuf: true, run_screenshots: true});
 
   const refresh = async () => {
-    const [targetRows, wordlistRows, appSettings] = await Promise.all([j(`${API}/targets`), j(`${API}/wordlists`), j(`${API}/settings`)]);
-    setTargets(targetRows); setWordlists(wordlistRows); setSettings(appSettings);
+    const [targetRows, wordlistRows, appSettings, healthInfo] = await Promise.all([j(`${API}/targets`), j(`${API}/wordlists`), j(`${API}/settings`), j(`${API}/health`)]);
+    setTargets(targetRows); setWordlists(wordlistRows); setSettings(appSettings); setHealth(healthInfo);
     if (active) setResult(await j(`${API}/targets/${active.id}/results`));
   };
   useEffect(() => { refresh(); }, []);
   usePoll(scan?.id, refresh);
 
   async function run() {
-    const payload = {domain, ...opts, subdomain_wordlist_id: opts.subdomain_wordlist_id ? Number(opts.subdomain_wordlist_id) : null, dirb_wordlist_id: opts.dirb_wordlist_id ? Number(opts.dirb_wordlist_id) : null};
-    const res = await j(`${API}/scans/run`, {method: 'POST', body: JSON.stringify(payload)});
-    setScan({id: res.scan_id}); setActive({id: res.target_id, domain}); await refresh();
+    setAlert('');
+    try {
+      const payload = {domain, ...opts, subdomain_wordlist_id: opts.subdomain_wordlist_id ? Number(opts.subdomain_wordlist_id) : null, dirb_wordlist_id: opts.dirb_wordlist_id ? Number(opts.dirb_wordlist_id) : null};
+      const res = await j(`${API}/scans/run`, {method: 'POST', body: JSON.stringify(payload)});
+      setScan({id: res.scan_id}); setActive({id: res.target_id, domain}); await refresh();
+    } catch (err) {
+      setAlert(err.message || String(err));
+    }
   }
   async function loadTarget(t) { setActive(t); setResult(await j(`${API}/targets/${t.id}/results`)); }
   async function deleteTarget(t) {
@@ -290,8 +301,8 @@ function App() {
     if (active?.id === t.id) { setActive(null); setResult(null); setDetail(null); }
     await refresh();
   }
-  async function upload(kind, file) { if (!file) return; const fd = new FormData(); fd.append('file', file); await fetch(`${API}/wordlists/${kind}`, {method: 'POST', body: fd}); await refresh(); }
-  async function saveSettings() { const body = {...settings, headers: Object.fromEntries((settings.headerLines || '').split('\n').filter(Boolean).map(l => { const [k, ...v] = l.split(':'); return [k.trim(), v.join(':').trim()]; }))}; delete body.headerLines; setSettings(await j(`${API}/settings`, {method: 'PUT', body: JSON.stringify(body)})); }
+  async function upload(kind, file) { if (!file) return; setAlert(''); try { const fd = new FormData(); fd.append('file', file); await j(`${API}/wordlists/${kind}`, {method: 'POST', body: fd}); await refresh(); } catch (err) { setAlert(err.message || String(err)); } }
+  async function saveSettings() { setAlert(''); try { const body = {...settings, headers: Object.fromEntries((settings.headerLines || '').split('\n').filter(Boolean).map(l => { const [k, ...v] = l.split(':'); return [k.trim(), v.join(':').trim()]; }))}; delete body.headerLines; setSettings(await j(`${API}/settings`, {method: 'PUT', body: JSON.stringify(body)})); } catch (err) { setAlert(err.message || String(err)); } }
   async function markInteresting(kind, row) { await j(`${API}/${kind}/${row.id}/interesting`, {method: 'PATCH', body: JSON.stringify({interesting: !row.interesting, note: row.note || '', tag: row.tag || ''})}); await refresh(); }
   const toggleSelected = (id, checked) => setSelectedIds(prev => { const next = new Set(prev); checked ? next.add(id) : next.delete(id); return next; });
 
@@ -301,16 +312,24 @@ function App() {
   const subdomainRows = (result?.subdomains || []).map(s => ({...s, url: s.name}));
   const dirRows = result?.dirs || [];
   const scanStatus = result?.active_scan || scan;
+  const scanRunning = ['queued', 'running'].includes(scanStatus?.status);
+  const defaultFfuf = health?.ffuf;
+  const defaultAvailable = Boolean(defaultFfuf?.default_wordlist_available);
+  const defaultName = defaultFfuf?.default_wordlist_name || 'common.txt';
+  const defaultLabel = defaultName === 'common.txt' ? 'SecLists common.txt' : defaultName;
+  const runError = opts.run_ffuf && !opts.dirb_wordlist_id && health && !defaultAvailable ? 'FFUF is enabled, but no selected or default directory wordlist is available.' : '';
+  const ffufWordlistHint = opts.run_ffuf && !opts.dirb_wordlist_id && defaultAvailable ? `${defaultLabel} will be used automatically.` : '';
+  const runDisabled = Boolean(runError) || scanRunning;
 
   return <div>
-    <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget}/>
+    <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError}/>{alert && <div className="alert">{alert}</div>}
     <main className="layout"><aside className="sidebar">
       <SidebarGroup title="⭐ Favorite Targets"><p className="muted">Bookmark rows with ⭐. Favorite target pinning is next.</p></SidebarGroup>
       <SidebarGroup title="Recent Targets">{targets.map(t => <div className="target-row" key={t.id}><button className="target" onClick={() => loadTarget(t)}>{t.domain}<span>{t.scan_count} scans</span></button><button className="danger small" title={`Delete ${t.domain}`} onClick={() => deleteTarget(t)}>Delete</button></div>)}</SidebarGroup>
       <SidebarGroup title="Scan History">{(result?.scans || []).map(s => <button className="target scan-history-item" key={s.id} onClick={() => j(`${API}/targets/${active.id}/results?scan_id=${s.id}`).then(setResult)}><b>Scan #{s.id}</b><span>{ago(s.created_at)} · {s.status}</span></button>)}</SidebarGroup>
-      <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Dirb wordlist</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></SidebarGroup>
+      <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select value={opts.dirb_wordlist_id || ''} onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Default — {defaultLabel}</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>{ffufWordlistHint && <p className="hint">{ffufWordlistHint}</p>}{!defaultAvailable && opts.run_ffuf && !opts.dirb_wordlist_id && health && <p className="inline-alert">Default FFUF wordlist unavailable. Upload/select a dirb wordlist.</p>}</SidebarGroup>
       <SidebarGroup title="Request Settings" defaultOpen={false}>{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
-      <SidebarGroup title="FFUF Options" defaultOpen={false}><input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label></SidebarGroup>
+      <SidebarGroup title="FFUF Options" defaultOpen={false}><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label></SidebarGroup>
       <SidebarGroup title="Import / Export" defaultOpen={false}><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></SidebarGroup>
     </aside>
     <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus} result={result}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Directories' ? dirRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
