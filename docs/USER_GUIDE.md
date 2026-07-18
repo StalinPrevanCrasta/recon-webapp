@@ -333,6 +333,28 @@ Supported `kind` values:
 
 Notes and interesting flags are persisted in SQLite.
 
+## Deleting a Target
+
+If you no longer want a target in the dashboard, use the **Delete** button beside that target in the **Recent Targets** sidebar section.
+
+The app asks for browser confirmation before deleting. Confirming deletion removes:
+
+- the target
+- all scans for that target
+- subdomains
+- live-host results
+- directory results
+- screenshot database records
+- raw-output database references
+
+This action cannot be undone from the UI. Export JSON/CSV first if you need a copy of the results.
+
+API equivalent:
+
+```http
+DELETE /api/targets/{target_id}
+```
+
 ## Using Burp or a Local Proxy
 
 To route supported batches through Burp running on the Windows host:
@@ -586,6 +608,7 @@ POST /api/scans/{scan_id}/rerun
 
 ```http
 GET /api/targets
+DELETE /api/targets/{target_id}
 GET /api/targets/{target_id}/results
 GET /api/targets/{target_id}/results?scan_id={scan_id}
 GET /api/targets/{target_id}/export?format=json

@@ -97,6 +97,28 @@ def scan_status(scan_id: int, db: Session = Depends(get_db)):
 def targets(db: Session = Depends(get_db)):
     return [{"id": t.id, "domain": t.domain, "created_at": t.created_at, "scan_count": len(t.scans)} for t in db.query(models.Target).order_by(models.Target.created_at.desc()).all()]
 
+@app.delete("/api/targets/{target_id}")
+def delete_target(target_id: int, db: Session = Depends(get_db)):
+    target = db.get(models.Target, target_id)
+    if not target:
+        raise HTTPException(404, "target not found")
+    scan_ids = [row.id for row in db.query(models.Scan.id).filter_by(target_id=target_id).all()]
+    deleted = {
+        "targets": 1,
+        "scans": len(scan_ids),
+        "subdomains": db.query(models.Subdomain).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "http": db.query(models.HttpxResult).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "dirs": db.query(models.DirbResult).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "screenshots": db.query(models.Screenshot).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "raw": 0,
+    }
+    if scan_ids:
+        deleted["raw"] = db.query(models.RawOutput).filter(models.RawOutput.scan_id.in_(scan_ids)).delete(synchronize_session=False)
+        db.query(models.Scan).filter(models.Scan.id.in_(scan_ids)).delete(synchronize_session=False)
+    db.delete(target)
+    db.commit()
+    return {"ok": True, "deleted": deleted}
+
 @app.get("/api/targets/{target_id}/results")
 def results(target_id: int, scan_id: int | None = None, db: Session = Depends(get_db)):
     target = db.get(models.Target, target_id)
