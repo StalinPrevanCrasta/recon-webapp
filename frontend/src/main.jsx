@@ -51,6 +51,50 @@ function statusClass(status) {
   return 'muted';
 }
 
+function normalizeTechName(name = '') {
+  return name
+    .replace(/^Amazon Web Services$/i, 'AWS')
+    .replace(/^Amazon CloudFront$/i, 'CloudFront')
+    .replace(/^Amazon S3$/i, 'S3')
+    .replace(/^Google Cloud$/i, 'GCP')
+    .replace(/^Microsoft Azure$/i, 'Azure');
+}
+
+function compactTech(tech = []) {
+  return [...new Set((tech || []).map(normalizeTechName).filter(Boolean))];
+}
+
+function techTone(name = '') {
+  const n = name.toLowerCase();
+  if (/graphql/.test(n)) return 'purple';
+  if (/aws|cloudfront|s3|azure|gcp|cloudflare/.test(n)) return 'cloud';
+  if (/admin|swagger|openapi/.test(n)) return 'warn';
+  return 'muted';
+}
+
+function TechBadges({tech = [], max = 2}) {
+  const items = compactTech(tech);
+  const shown = items.slice(0, max);
+  const rest = items.length - shown.length;
+  return <div className="tech-inline">{shown.map(t => <Badge key={t} tone={techTone(t)}>{t}</Badge>)}{rest > 0 && <Badge tone="muted">+{rest}</Badge>}</div>;
+}
+
+function faviconFor(value = '') {
+  const host = hostFromUrl(value);
+  const letter = (host || '?').replace(/^www\./, '')[0]?.toUpperCase() || '?';
+  return <span className="favicon">{letter}</span>;
+}
+
+function countBy(rows, getter) {
+  const map = new Map();
+  rows.forEach(r => {
+    const key = getter(r);
+    if (!key) return;
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+  return [...map.entries()].sort((a, b) => b[1] - a[1]);
+}
+
 function tagsFor(row) {
   const haystack = `${row.url || row.name || ''} ${row.title || ''} ${(row.tech || []).join(' ')}`.toLowerCase();
   const tags = [];
@@ -74,30 +118,41 @@ function SidebarGroup({title, children, defaultOpen = true}) {
 }
 
 function SummaryCards({result}) {
+  const http = result?.http || [];
   const subdomains = result?.subdomains?.length || 0;
-  const live = (result?.http || []).filter(h => h.status_code && h.status_code < 500).length;
+  const live = http.filter(h => h.status_code && h.status_code < 500).length;
   const screenshots = result?.screenshots?.length || 0;
   const directories = result?.dirs?.length || 0;
-  const interesting = [...(result?.subdomains || []), ...(result?.http || []), ...(result?.dirs || []), ...(result?.screenshots || [])].filter(r => r.interesting).length;
-  const takeoverHints = (result?.http || []).filter(h => /github|heroku|netlify|s3|azure|cloudfront/i.test(`${h.title || ''} ${(h.tech || []).join(' ')}`)).length;
-  return <div className="cards">
-    <div className="card"><b>{subdomains}</b><span>Subdomains</span></div>
-    <div className="card"><b>{live}</b><span>Live Hosts</span></div>
-    <div className="card"><b>{screenshots}</b><span>Screenshots</span></div>
-    <div className="card"><b>{directories}</b><span>Directories</span></div>
-    <div className="card hot"><b>{interesting}</b><span>Interesting</span></div>
-    <div className="card warn"><b>{takeoverHints}</b><span>Takeover Hints</span></div>
-  </div>;
+  const interesting = [...(result?.subdomains || []), ...http, ...(result?.dirs || []), ...(result?.screenshots || [])].filter(r => r.interesting).length;
+  const takeoverHints = http.filter(h => /github|heroku|netlify|s3|azure|cloudfront/i.test(`${h.title || ''} ${(h.tech || []).join(' ')}`)).length;
+  const ips = new Set(http.map(h => h.ip).filter(Boolean)).size;
+  const uniqueTech = new Set(http.flatMap(h => compactTech(h.tech))).size;
+  const cdns = http.filter(h => /cloudflare|cloudfront|akamai|fastly/i.test((h.tech || []).join(' '))).length;
+  return <>
+    <div className="cards compact-cards">
+      <div className="card"><span className="card-icon">🌐</span><b>{subdomains}</b><span>Subdomains</span></div>
+      <div className="card"><span className="card-icon">🖥</span><b>{live}</b><span>Live Hosts</span></div>
+      <div className="card"><span className="card-icon">📷</span><b>{screenshots}</b><span>Screenshots</span></div>
+      <div className="card"><span className="card-icon">📂</span><b>{directories}</b><span>Directories</span></div>
+      <div className="card hot"><span className="card-icon">🔥</span><b>{interesting}</b><span>Interesting</span></div>
+      <div className="card warn"><span className="card-icon">⚠</span><b>{takeoverHints}</b><span>Takeover Hints</span></div>
+    </div>
+    <div className="infra-stats"><Badge>IPs {ips}</Badge><Badge>Unique Tech {uniqueTech}</Badge><Badge>CDNs {cdns}</Badge><Badge>Cloud Providers {http.filter(h => /aws|azure|gcp|cloudflare/i.test((h.tech || []).join(' '))).length}</Badge></div>
+  </>;
 }
 
-function ProgressPanel({scan}) {
+function ProgressPanel({scan, result}) {
   const stage = scan?.stage || 'queued';
   const status = scan?.status || 'idle';
+  const totalHosts = result?.subdomains?.length || 0;
+  const liveHosts = result?.http?.length || 0;
+  const dirCount = result?.dirs?.length || 0;
+  const screenshotCount = result?.screenshots?.length || 0;
   const stages = [
-    ['subdomains', 'Subdomain enum'],
-    ['httpx', 'Httpx live probe'],
-    ['ffuf', 'FFUF content scan'],
-    ['screenshots', 'Gowitness screenshots'],
+    ['subdomains', 'Subdomains', `${totalHosts}/${totalHosts || '—'}`],
+    ['httpx', 'Httpx', `${liveHosts}/${totalHosts || '—'}`],
+    ['ffuf', 'FFUF', `${dirCount} paths`],
+    ['screenshots', 'Gowitness', `${screenshotCount} shots`],
   ];
   const activeIndex = stages.findIndex(([key]) => stage.includes(key));
   const complete = status === 'complete';
@@ -106,7 +161,7 @@ function ProgressPanel({scan}) {
     <div className="stage-list">{stages.map(([key, label], idx) => {
       const done = complete || idx < activeIndex;
       const active = idx === activeIndex && !complete;
-      return <div key={key} className={`stage ${done ? 'done' : ''} ${active ? 'active' : ''}`}><span>{done ? '✓' : active ? '●' : '○'}</span>{label}</div>;
+      return <div key={key} className={`stage ${done ? 'done' : ''} ${active ? 'active' : ''}`}><span>{done ? '✓' : active ? '●' : '○'}</span><b>{label}</b><em>{stages[idx][2]}</em><small>{done ? `Completed in ${fmtDuration(scan)}` : active ? 'Running…' : 'Queued'}</small></div>;
     })}</div>
     <div className="elapsed">Elapsed: {fmtDuration(scan)} · Started: {ago(scan?.started_at || scan?.created_at)}</div>
     <div className="bar"><span style={{width: `${scan?.progress || 0}%`}} /></div>
@@ -124,14 +179,17 @@ function Header({domain, setDomain, run, result, targets, loadTarget}) {
 }
 
 function Filters({filters, setFilters}) {
-  return <div className="filters">
-    <input className="wide" placeholder="Search host, title, tech, IP, tag..." value={filters.q} onChange={e => setFilters({...filters, q: e.target.value})}/>
-    <input placeholder="HTTP status" value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}/>
-    <input placeholder="Technology" value={filters.tech} onChange={e => setFilters({...filters, tech: e.target.value})}/>
-    <input placeholder="IP / ASN" value={filters.ip} onChange={e => setFilters({...filters, ip: e.target.value})}/>
-    <label className="inline"><input type="checkbox" checked={filters.interesting} onChange={e => setFilters({...filters, interesting: e.target.checked})}/> Interesting only</label>
-    <label className="inline"><input type="checkbox" checked={filters.alive} onChange={e => setFilters({...filters, alive: e.target.checked})}/> Alive only</label>
-  </div>;
+  const chips = ['Alive', 'Interesting', 'APIs', 'Login', 'Admin', 'GraphQL', 'Swagger', 'Takeover'];
+  const toggleChip = chip => setFilters({...filters, chips: filters.chips.includes(chip) ? filters.chips.filter(c => c !== chip) : [...filters.chips, chip]});
+  return <>
+    <div className="filters compact-filters">
+      <input className="wide" placeholder="/ Search host, title, tech, IP, tag..." value={filters.q} onChange={e => setFilters({...filters, q: e.target.value})}/>
+      <input placeholder="Status" value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}/>
+      <input placeholder="Technology" value={filters.tech} onChange={e => setFilters({...filters, tech: e.target.value})}/>
+      <input placeholder="IP / ASN" value={filters.ip} onChange={e => setFilters({...filters, ip: e.target.value})}/>
+    </div>
+    <div className="filter-chips">{chips.map(chip => <button key={chip} className={filters.chips.includes(chip) ? 'chip active' : 'chip'} onClick={() => toggleChip(chip)}>{filters.chips.includes(chip) ? '☑' : '☐'} {chip}</button>)}</div>
+  </>;
 }
 
 function applyFilters(rows, filters) {
@@ -141,13 +199,19 @@ function applyFilters(rows, filters) {
       (!filters.status || String(row.status_code || '').includes(filters.status)) &&
       (!filters.tech || blob.includes(filters.tech.toLowerCase())) &&
       (!filters.ip || String(row.ip || '').includes(filters.ip)) &&
-      (!filters.interesting || row.interesting) &&
-      (!filters.alive || (row.status_code && row.status_code < 500));
+      (!filters.chips.includes('Interesting') || row.interesting) &&
+      (!filters.chips.includes('Alive') || (row.status_code && row.status_code < 500)) &&
+      (!filters.chips.includes('APIs') || /api/i.test(blob)) &&
+      (!filters.chips.includes('Login') || /login|signin|sso|auth/i.test(blob)) &&
+      (!filters.chips.includes('Admin') || /admin|manage|console|dashboard/i.test(blob)) &&
+      (!filters.chips.includes('GraphQL') || /graphql/i.test(blob)) &&
+      (!filters.chips.includes('Swagger') || /swagger|openapi/i.test(blob)) &&
+      (!filters.chips.includes('Takeover') || /github|heroku|netlify|s3|azure|cloudfront/i.test(blob));
   });
 }
 
 function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInteresting}) {
-  const [filters, setFilters] = useState({q: '', status: '', tech: '', ip: '', interesting: false, alive: false});
+  const [filters, setFilters] = useState({q: '', status: '', tech: '', ip: '', chips: []});
   const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
   const copy = value => navigator.clipboard?.writeText(value).catch(() => {});
   return <>
@@ -158,14 +222,14 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
       const tags = tagsFor(row);
       return <tr key={`${kind}-${row.id}`} onClick={() => selectRow({...row, kind})} className={row.is_new ? 'new' : ''}>
         <td onClick={e => e.stopPropagation()}><input type="checkbox" checked={selectedIds.has(row.id)} onChange={e => toggleSelected(row.id, e.target.checked)}/></td>
-        <td><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div></td>
+        <td><div className="host-cell">{faviconFor(value)}<div><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div></div></div></td>
         <td>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : <span className="muted">—</span>}</td>
         <td>{row.title || row.path || <span className="muted">—</span>}</td>
         <td>{row.ip || <span className="muted">—</span>}</td>
-        <td>{(row.tech || []).slice(0, 4).map(t => <Badge key={t}>{t}</Badge>)}</td>
+        <td><TechBadges tech={row.tech} /></td>
         <td>{(row.sources || []).join(', ') || row.base_url || <span className="muted">—</span>}</td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t.includes('🔥') ? 'hot' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
-        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>🌐</button><button onClick={() => copy(value)}>📋</button><button onClick={() => markInteresting(kind, row)}>⭐</button></td>
+        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>🌐</button><button onClick={() => copy(value)}>📋</button><button onClick={() => markInteresting(kind, row)}>⭐</button><button title="Screenshot">📸</button><button title="Run nuclei">⚡</button><button title="More">⋮</button></td>
       </tr>;
     })}</tbody></table>
   </>;
@@ -179,10 +243,17 @@ function RawConsole({rows}) {
   return <div className="console"><div className="console-title">Live / Raw Output</div>{rows.length ? rows.map(r => <div key={r.id} className="logline"><span>[{r.tool}]</span> {r.stage} · {r.path}</div>) : <div className="logline muted">No raw output yet. Logs will appear after stages complete.</div>}</div>;
 }
 
-function DetailsPanel({row, close, markInteresting}) {
-  if (!row) return <aside className="details empty"><h3>Details</h3><p>Select a host, directory, subdomain, or screenshot.</p></aside>;
+function DetailsPanel({row, result, close, markInteresting}) {
+  const http = result?.http || [];
+  if (!row) {
+    const codes = countBy(http, r => r.status_code).slice(0, 5);
+    const techs = countBy(http.flatMap(h => compactTech(h.tech)).map(t => ({t})), r => r.t).slice(0, 6);
+    return <aside className="details empty"><h3>Details</h3><p>Select a host to inspect technologies, headers, tags, and quick actions.</p><div className="mini-chart"><b>Response Codes</b>{codes.map(([code, n]) => <div className="bar-row" key={code}><span>{code}</span><i style={{width: `${Math.min(100, n * 8)}%`}} /> <em>{n}</em></div>)}</div><div className="mini-chart"><b>Top Technologies</b>{techs.map(([tech, n]) => <div className="bar-row" key={tech}><span>{tech}</span><i style={{width: `${Math.min(100, n * 8)}%`}} /> <em>{n}</em></div>)}</div><div className="timeline"><b>Scan Timeline</b><p>Subdomains → Httpx → FFUF → Gowitness → Finished</p></div></aside>;
+  }
   const value = row.url || row.name || row.image_path;
-  return <aside className="details"><button className="close" onClick={close}>×</button><h3>{hostFromUrl(value)}</h3><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Title</span>{row.title || row.path || '—'}</div><div className="detail-row"><span>Tech</span>{(row.tech || []).join(', ') || '—'}</div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy</button><button onClick={() => markInteresting(row.kind, row)}>Bookmark</button></div></aside>;
+  const cdn = compactTech(row.tech).find(t => /cloudfront|cloudflare|akamai|fastly/i.test(t)) || '—';
+  const asn = /amazon|aws|cloudfront|s3/i.test((row.tech || []).join(' ')) ? 'Amazon' : /cloudflare/i.test((row.tech || []).join(' ')) ? 'Cloudflare' : '—';
+  return <aside className="details"><button className="close" onClick={close}>×</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title</span>{row.title || row.path || '—'}</div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>🌐 Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>📋 Copy URL</button><button>📸 Screenshot</button><button>🔍 Whois</button><button>⚡ Run Nuclei</button><button>🕷 Crawl</button><button onClick={() => markInteresting(row.kind, row)}>⭐ Bookmark</button></div></aside>;
 }
 
 function App() {
@@ -236,19 +307,19 @@ function App() {
     <main className="layout"><aside className="sidebar">
       <SidebarGroup title="⭐ Favorite Targets"><p className="muted">Bookmark rows with ⭐. Favorite target pinning is next.</p></SidebarGroup>
       <SidebarGroup title="Recent Targets">{targets.map(t => <div className="target-row" key={t.id}><button className="target" onClick={() => loadTarget(t)}>{t.domain}<span>{t.scan_count} scans</span></button><button className="danger small" title={`Delete ${t.domain}`} onClick={() => deleteTarget(t)}>Delete</button></div>)}</SidebarGroup>
-      <SidebarGroup title="Scan History">{(result?.scans || []).map(s => <button className="target" key={s.id} onClick={() => j(`${API}/targets/${active.id}/results?scan_id=${s.id}`).then(setResult)}>Scan {s.id}<span>{s.status}</span></button>)}</SidebarGroup>
+      <SidebarGroup title="Scan History">{(result?.scans || []).map(s => <button className="target scan-history-item" key={s.id} onClick={() => j(`${API}/targets/${active.id}/results?scan_id=${s.id}`).then(setResult)}><b>Scan #{s.id}</b><span>{ago(s.created_at)} · {s.status}</span></button>)}</SidebarGroup>
       <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Dirb wordlist</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></SidebarGroup>
       <SidebarGroup title="Request Settings" defaultOpen={false}>{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
       <SidebarGroup title="FFUF Options" defaultOpen={false}><input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label></SidebarGroup>
       <SidebarGroup title="Import / Export" defaultOpen={false}><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></SidebarGroup>
     </aside>
-    <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Directories' ? dirRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
+    <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus} result={result}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Directories' ? dirRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
       {tab === 'Subdomains' && <AssetTable rows={subdomainRows} kind="subdomains" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>} 
       {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>} 
       {tab === 'Directories' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>} 
       {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>} 
       {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>} 
-    </section><DetailsPanel row={detail} close={() => setDetail(null)} markInteresting={markInteresting}/></main>
+    </section><DetailsPanel row={detail} result={result} close={() => setDetail(null)} markInteresting={markInteresting}/></main>
   </div>;
 }
 

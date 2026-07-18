@@ -307,6 +307,18 @@ GET /api/targets/{target_id}/export?format=csv
 
 Use JSON when you want complete structured data. Use CSV for quick spreadsheet review.
 
+## Dashboard Triage Tips
+
+The dashboard is optimized for dense recon review:
+
+- Technology names are shortened where possible, for example `Amazon CloudFront` becomes `CloudFront` and `Amazon Web Services` becomes `AWS`.
+- Long technology stacks are compacted into inline badges with a `+N` badge so table rows stay short.
+- Use filter chips for common bug bounty review flows: **Alive**, **Interesting**, **APIs**, **Login**, **Admin**, **GraphQL**, **Swagger**, and **Takeover**.
+- Click any table row to populate the right-side details panel with status, IP, inferred ASN/CDN, title, technologies, headers sent, and quick actions.
+- When no row is selected, the details panel shows summary charts for response codes and top technologies.
+- Row actions provide quick open/copy/bookmark/screenshot/nuclei placeholders without leaving the list.
+- The top cards and infrastructure strip summarize subdomains, live hosts, screenshots, directories, interesting items, takeover hints, IP count, unique tech, CDNs, and cloud-provider hints.
+
 ## Marking Interesting Findings
 
 The backend supports marking individual items interesting with notes.
