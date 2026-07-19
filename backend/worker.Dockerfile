@@ -1,4 +1,4 @@
-FROM kalilinux/kali-rolling
+FROM kalilinux/kali-rolling@sha256:b3d7855dd35daa5e56a6806e9c34cb91c954d9a8a97b78c3352438732a61a079
 ENV DEBIAN_FRONTEND=noninteractive PATH=/root/go/bin:/usr/local/go/bin:$PATH RECON_DATA_DIR=/data
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,8 +11,10 @@ RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && 
     go install github.com/sensepost/gowitness@latest && \
     go install github.com/d3mondev/puredns/v2@latest && \
     go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+
 COPY requirements.txt /app/requirements.txt
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /app/requirements.txt
 ENV PATH=/opt/venv/bin:/root/go/bin:$PATH
 COPY app /app/app
+
 CMD ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
