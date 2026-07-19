@@ -14,7 +14,7 @@ services:
     image: recon-webapp-backend:latest
     build:
       context: ./backend
-      dockerfile: Dockerfile.local
+      dockerfile: Dockerfile
     environment:
       RECON_DATA_DIR: /data
       DEFAULT_FFUF_WORDLIST: /usr/share/seclists/Discovery/Web-Content/common.txt
