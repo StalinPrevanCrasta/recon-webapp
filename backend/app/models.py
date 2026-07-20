@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -42,7 +42,10 @@ class Subdomain(Base):
 
 class HttpxResult(Base):
     __tablename__ = "httpx_results"
-    __table_args__ = (UniqueConstraint("scan_id", "url", name="uq_scan_url"),)
+    __table_args__ = (
+        UniqueConstraint("scan_id", "url", name="uq_scan_url"),
+        Index("ix_httpx_scan_status", "scan_id", "status_code"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
@@ -64,6 +67,8 @@ class DirbResult(Base):
     __table_args__ = (
         UniqueConstraint("scan_id", "url", name="uq_scan_dir_url"),
         UniqueConstraint("scan_id", "base_url", "normalized_path", "method", name="uq_scan_base_path_method"),
+        Index("ix_dirb_scan_conf", "scan_id", "confidence"),
+        Index("ix_dirb_scan_base", "scan_id", "base_url"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)

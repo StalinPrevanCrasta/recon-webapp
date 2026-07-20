@@ -16,7 +16,8 @@ except Exception:  # pragma: no cover - exercised when dependency missing in con
 LOG_VIEWER_DISABLED = "Docker log viewer is disabled."
 DOCKER_UNAVAILABLE = "Docker logs are unavailable because the API cannot access the Docker daemon."
 DEFAULT_SERVICES = "backend,worker,frontend,redis"
-MAX_CLIENTS = 5
+MAX_CLIENTS = int(os.getenv("DOCKER_LOG_MAX_CLIENTS", "5"))
+LOG_BUFFER_LIMIT = int(os.getenv("DOCKER_LOG_BUFFER_LIMIT", "10000"))
 _client_lock = threading.Lock()
 _active_clients = 0
 
@@ -205,7 +206,7 @@ async def stream_logs(container: str = "all", tail: int | str | None = None):
         yield sse("error", {"message": "Too many active log viewers. Try again later."})
         return
     stop = threading.Event()
-    q: queue.Queue = queue.Queue(maxsize=10000)
+    q: queue.Queue = queue.Queue(maxsize=LOG_BUFFER_LIMIT)
     threads: list[threading.Thread] = []
     try:
         client = docker_client()

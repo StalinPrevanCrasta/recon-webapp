@@ -7,8 +7,12 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'recon.db'}")
+SQLITE_BUSY_TIMEOUT = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False, "timeout": SQLITE_BUSY_TIMEOUT / 1000}
+else:
+    connect_args = {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
@@ -43,10 +47,32 @@ def _sqlite_add_missing_columns() -> None:
         conn.execute(text("UPDATE dirb_results SET confidence = COALESCE(confidence, 'unverified')"))
 
 
+def _sqlite_create_indexes() -> None:
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS ix_httpx_scan_status ON httpx_results(scan_id, status_code)",
+        "CREATE INDEX IF NOT EXISTS ix_dirb_scan_conf ON dirb_results(scan_id, confidence)",
+        "CREATE INDEX IF NOT EXISTS ix_dirb_scan_base ON dirb_results(scan_id, base_url)",
+    ]
+    with engine.begin() as conn:
+        for stmt in indexes:
+            conn.execute(text(stmt))
+
+
 def init_db() -> None:
     from app import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _sqlite_add_missing_columns()
+    _sqlite_create_indexes()
+    if DATABASE_URL.startswith("sqlite"):
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.execute(text("PRAGMA busy_timeout=10000"))
+            conn.execute(text("PRAGMA synchronous=NORMAL"))
+            conn.execute(text("PRAGMA cache_size=-8000"))
+            conn.execute(text("PRAGMA temp_store=MEMORY"))
+            conn.commit()
 
 
 def get_db():

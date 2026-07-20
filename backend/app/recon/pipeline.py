@@ -1,13 +1,20 @@
 import hashlib
 import json
+import logging
+import os
 import re
 import secrets
 import shutil
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx as pyhttpx
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app import models
 from app.recon.runner import run_command
@@ -17,6 +24,12 @@ from app.recon.wrappers import (
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
+
+# Performance tuning env vars
+SCAN_CONCURRENT_ENUM = int(os.getenv("SCAN_CONCURRENT_ENUM", "2"))
+SCAN_FFUF_PARALLEL = int(os.getenv("SCAN_FFUF_PARALLEL", "2"))
+SCAN_SCREENSHOT_PARALLEL = int(os.getenv("SCAN_SCREENSHOT_PARALLEL", "1"))
+SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "500"))
 
 DATA_DIR = Path(__import__('os').getenv("RECON_DATA_DIR", "/data"))
 RAW_DIR = DATA_DIR / "raw"
@@ -47,6 +60,12 @@ def raw_path(scan_id: int, stage: str, tool: str, suffix: str = "txt") -> Path:
 
 def record_raw(db: Session, scan_id: int, stage: str, tool: str, path: Path) -> None:
     db.add(models.RawOutput(scan_id=scan_id, stage=stage, tool=tool, path=str(path)))
+    db.commit()
+
+
+def batch_record_raw(db: Session, scan_id: int, records: list[tuple[str, str, Path]]) -> None:
+    for stage, tool, path in records:
+        db.add(models.RawOutput(scan_id=scan_id, stage=stage, tool=tool, path=str(path)))
     db.commit()
 
 def clear_scan_raw(db: Session, scan_id: int, stage_only: str | None = None) -> None:
@@ -126,7 +145,6 @@ def upsert_subdomain(db: Session, target_id: int, scan_id: int, name: str, sourc
     name = name.strip().lower().rstrip('.')
     if not name:
         return
-    db.flush()
     row = db.query(models.Subdomain).filter_by(target_id=target_id, name=name).one_or_none()
     if row:
         row.scan_id = scan_id
@@ -134,6 +152,41 @@ def upsert_subdomain(db: Session, target_id: int, scan_id: int, name: str, sourc
         row.depths = sorted(set((row.depths or []) + [depth]))
     else:
         db.add(models.Subdomain(target_id=target_id, scan_id=scan_id, name=name, sources=[source], depths=[depth], first_seen_scan_id=scan_id))
+
+
+def _valid_hostname(name: str) -> bool:
+    """Basic hostname validation — rejects garbage from enumeration tools."""
+    if not name or len(name) > 253:
+        return False
+    if not re.fullmatch(r"[a-z0-9._-]+", name):
+        return False
+    labels = name.split(".")
+    if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") for label in labels):
+        return False
+    return True
+
+
+def batch_upsert_subdomains(db: Session, target_id: int, scan_id: int, names: list[tuple[str, str, int]]) -> None:
+    """Batch upsert many subdomains: each tuple is (name, source, depth). Deduplicates in-batch."""
+    if not names:
+        return
+    existing = {r.name: r for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()}
+    to_add = []
+    seen_in_batch: set[str] = set()
+    for name, source, depth in names:
+        name = name.strip().lower().rstrip(".")
+        if not name or not _valid_hostname(name) or name in seen_in_batch:
+            continue
+        seen_in_batch.add(name)
+        row = existing.get(name)
+        if row:
+            row.scan_id = scan_id
+            row.sources = sorted(set((row.sources or []) + [source]))
+            row.depths = sorted(set((row.depths or []) + [depth]))
+        else:
+            to_add.append(models.Subdomain(target_id=target_id, scan_id=scan_id, name=name, sources=[source], depths=[depth], first_seen_scan_id=scan_id))
+    for obj in to_add:
+        db.add(obj)
     db.flush()
 
 def crtsh(domain: str) -> set[str]:
@@ -166,6 +219,16 @@ def mutate_names(names: set[str], domain: str) -> set[str]:
             out.add(f"{w}.{name}")
     return out
 
+def _run_enum_tool(name: str, builder, domain, out, timeout, scan_id: int):
+    """Run a single enumeration tool. Returns (name, success, error_message)."""
+    try:
+        run_command(builder(domain, out), timeout=timeout, scan_id=scan_id)
+        return name, True, None
+    except Exception as e:
+        out.write_text(str(e))
+        return name, False, str(e)
+
+
 def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     config = scan.config or {}
     target = scan.target
@@ -174,25 +237,62 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     depth_max = int(config.get("recursion_depth", 2))
     tool_timeouts = {"subfinder": int(config.get("subfinder_timeout", 300)), "amass": int(config.get("amass_timeout", 120))}
     seen: set[str] = set()
-    for tool, builder in [("subfinder", build_subfinder_command), ("amass", build_amass_command)]:
-        out = raw_path(scan.id, "subdomains", tool)
-        try:
-            run_command(builder(domain, out), timeout=tool_timeouts.get(tool, 300))
-            record_raw(db, scan.id, "subdomains", tool, out)
-            for name in out.read_text(errors="ignore").splitlines():
-                seen.add(name.strip().lower())
-                upsert_subdomain(db, target.id, scan.id, name, tool, 0)
-            db.commit()
-        except Exception as e:
-            out.write_text(str(e))
-            record_raw(db, scan.id, "subdomains", f"{tool}-error", out)
-    ctnames = crtsh(domain)
+
+    # Run enumeration tools concurrently
+    tool_results: list[tuple[str, Path]] = []
+    tool_path_map: dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
+        futures = {}
+        for tool, builder in [("subfinder", build_subfinder_command), ("amass", build_amass_command)]:
+            out = raw_path(scan.id, "subdomains", tool)
+            tool_results.append((tool, out))
+            tool_path_map[tool] = out
+            futures[exc.submit(_run_enum_tool, tool, builder, domain, out, tool_timeouts.get(tool, 300), scan.id)] = tool
+        # Also submit crtsh concurrently
+        futures[exc.submit(crtsh, domain)] = "crtsh"
+        ct_result = set()
+        for future in as_completed(futures):
+            tool_name = futures[future]
+            try:
+                result = future.result()
+                if tool_name == "crtsh":
+                    ct_result = result
+                else:
+                    tool_out = tool_path_map.get(tool_name, out)
+                    if result[1]:
+                        record_raw(db, scan.id, "subdomains", tool_name, tool_out)
+                    else:
+                        record_raw(db, scan.id, "subdomains", f"{tool_name}-error", tool_out)
+            except Exception:
+                tool_out = tool_path_map.get(tool_name, out)
+                record_raw(db, scan.id, "subdomains", f"{tool_name}-error", tool_out)
+
+    # Process subfinder/amass output — read each file once
+    batch_names = []
+    for tool, out in tool_results:
+        seen_in_file: set[str] = set()
+        for line in out.read_text(errors="ignore").splitlines():
+            clean = line.strip().lower()
+            if not clean or clean in seen_in_file:
+                continue
+            seen_in_file.add(clean)
+            seen.add(clean)
+            batch_names.append((clean, tool, 0))
+    batch_upsert_subdomains(db, target.id, scan.id, batch_names)
+
+    # Process crtsh results
     ctout = raw_path(scan.id, "subdomains", "crtsh")
-    ctout.write_text("\n".join(sorted(ctnames)))
+    ctout.write_text("\n".join(sorted(ct_result)))
     record_raw(db, scan.id, "subdomains", "crtsh", ctout)
-    for name in ctnames:
-        seen.add(name); upsert_subdomain(db, target.id, scan.id, name, "crtsh", 0)
+    batch_ct = []
+    for name in ct_result:
+        clean = name.strip().lower()
+        if clean:
+            seen.add(clean)
+            batch_ct.append((clean, "crtsh", 0))
+    batch_upsert_subdomains(db, target.id, scan.id, batch_ct)
     db.commit()
+
     frontier = set(seen) or {domain}
     if wordlist:
         if not DEFAULT_RESOLVERS.exists():
@@ -202,17 +302,27 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
             for base in sorted(frontier):
                 out = raw_path(scan.id, f"subdomains-depth-{depth}", re.sub(r"[^a-zA-Z0-9_.-]", "_", base))
                 try:
-                    run_command(build_puredns_command(base, Path(wordlist.path), DEFAULT_RESOLVERS, out), timeout=1800)
+                    run_command(build_puredns_command(base, Path(wordlist.path), DEFAULT_RESOLVERS, out), timeout=1800, scan_id=scan.id)
                     record_raw(db, scan.id, f"subdomains-depth-{depth}", "puredns", out)
                     for name in out.read_text(errors="ignore").splitlines():
                         if name and name not in seen:
                             seen.add(name); next_frontier.add(name)
-                        upsert_subdomain(db, target.id, scan.id, name, "puredns", depth)
                 except Exception as e:
                     out.write_text(str(e)); record_raw(db, scan.id, f"subdomains-depth-{depth}", "puredns-error", out)
+            if next_frontier:
+                batch_next = []
+                for name in next_frontier:
+                    batch_next.append((name, "puredns", depth))
+                batch_upsert_subdomains(db, target.id, scan.id, batch_next)
+            # Mutations
+            batch_mut = []
             for name in mutate_names(next_frontier or frontier, domain):
                 if name not in seen:
-                    seen.add(name); upsert_subdomain(db, target.id, scan.id, name, "mutation", depth)
+                    seen.add(name)
+                    batch_mut.append((name, "mutation", depth))
+            if batch_mut:
+                batch_upsert_subdomains(db, target.id, scan.id, batch_mut)
+            batch_mut.clear()
             frontier = next_frontier
             db.commit()
     db.commit()
@@ -223,22 +333,91 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
     subs = [r.name for r in db.query(models.Subdomain).filter_by(target_id=scan.target_id).all()]
     infile = raw_path(scan.id, "httpx", "input")
     outfile = raw_path(scan.id, "httpx", "httpx", "jsonl")
+    # Ensure the output directory exists before any file operations
+    outfile.parent.mkdir(parents=True, exist_ok=True)
     infile.write_text("\n".join(sorted(set(subs))))
+    if not subs:
+        outfile.write_text("")
+        record_raw(db, scan.id, "httpx", "httpx", outfile)
+        return []
     headers = settings.headers.copy()
-    run_command(build_httpx_command(infile, outfile, settings.user_agent, headers, settings.proxy), timeout=1800)
+    # Pre-create the output file so httpx appends to it, ensuring it exists
+    # even if httpx fails or produces no results.
+    outfile.write_text("")
+    try:
+        run_command(build_httpx_command(infile, outfile, settings.user_agent, headers, settings.proxy), timeout=1800, scan_id=scan.id)
+    except Exception as exc:
+        # If httpx fails, log the error but continue with whatever output we have
+        logger.warning("httpx command failed: %s", exc)
+    if not outfile.exists():
+        outfile.write_text("")
     record_raw(db, scan.id, "httpx", "httpx", outfile)
     rows = parse_httpx_jsonl(outfile.read_text(errors="ignore"))
     urls = []
+    existing_urls = {r.url for r in db.query(models.HttpxResult.url).filter_by(scan_id=scan.id).all()}
+    prior_map = {}
+    to_add = []
     for item in rows:
         if not item.get("url"):
             continue
-        urls.append(item["url"])
-        existing = db.query(models.HttpxResult).filter_by(scan_id=scan.id, url=item["url"]).one_or_none()
-        if not existing:
-            prior = db.query(models.HttpxResult).filter_by(target_id=scan.target_id, url=item["url"]).order_by(models.HttpxResult.id.asc()).first()
-            db.add(models.HttpxResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior.first_seen_scan_id if prior else scan.id, headers_sent={"User-Agent": settings.user_agent, **headers}, **item))
+        url = item["url"]
+        urls.append(url)
+        if url in existing_urls:
+            continue
+        if url not in prior_map:
+            prior = db.query(models.HttpxResult).filter_by(target_id=scan.target_id, url=url).order_by(models.HttpxResult.id.asc()).first()
+            prior_map[url] = prior.first_seen_scan_id if prior else scan.id
+        to_add.append(models.HttpxResult(
+            target_id=scan.target_id, scan_id=scan.id,
+            first_seen_scan_id=prior_map[url],
+            headers_sent={"User-Agent": settings.user_agent, **headers}, **item
+        ))
+    for obj in to_add:
+        db.add(obj)
     db.commit()
     return urls
+
+def _ffuf_host(db: Session, scan: models.Scan, url: str, config: dict, settings, resolved_wordlist) -> dict | None:
+    """Run ffuf against a single host. Returns None on success or error dict on failure."""
+    out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url), "json")
+    cmd = None
+    try:
+        baseline = probe_random_paths(url, int(config.get("ffuf_baseline_count", 3)), settings.headers, settings.proxy)
+        baseline_out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url) + "-baseline", "json")
+        baseline_out.write_text(json.dumps({"base_url": url, "wildcard_baseline": baseline}, indent=2), encoding="utf-8")
+        # record_raw uses same db session
+        derived_filters = derive_ffuf_filters(baseline)
+        filter_size = config.get("ffuf_filter_size") or derived_filters.get("filter_size")
+        filter_words = config.get("ffuf_filter_words") or derived_filters.get("filter_words")
+        filter_lines = config.get("ffuf_filter_lines") or derived_filters.get("filter_lines")
+        cmd = build_ffuf_command(
+            url, resolved_wordlist.path, out, config.get("extensions", ""),
+            bool(config.get("ffuf_recursive", False)), config.get("ffuf_match_codes", "all"),
+            filter_size, int(config.get("ffuf_threads", 25)), config.get("ffuf_rate"),
+            settings.headers, settings.proxy, bool(config.get("ffuf_auto_calibration", True)),
+            filter_words, filter_lines,
+        )
+        run_command(cmd, timeout=int(config.get("ffuf_host_timeout", 3600)), scan_id=scan.id)
+        baseline_out.write_text(json.dumps({"base_url": url, "wildcard_baseline": baseline}, indent=2), encoding="utf-8")
+        seen_keys: set[tuple] = set()
+        items = []
+        for item in parse_ffuf_json(out.read_text(errors="ignore")):
+            if not item.get("url"):
+                continue
+            item = classify_ffuf_result(item, baseline)
+            item["normalized_path"] = normalize_content_path(item.get("normalized_path") or item.get("path"))
+            item["method"] = item.get("method") or "GET"
+            dedupe_key = (url, item.get("normalized_path"), item.get("method"))
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            items.append(item)
+        return {"url": url, "items": items, "out": out, "baseline_out": baseline_out}
+    except Exception as e:
+        err = {"url": url, "command": cmd, "error": str(e), "error_type": type(e).__name__}
+        out.write_text(json.dumps(err, indent=2), encoding="utf-8")
+        return err
+
 
 def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
     settings = load_settings(); config = scan.config or {}
@@ -248,62 +427,60 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
     record_raw(db, scan.id, "ffuf", "ffuf-wordlist", metadata)
     urls = urls or [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500).all()]
     stats = {"total_hosts": len(urls), "successful_hosts": 0, "failed_hosts": 0, "errors": []}
-    for idx, url in enumerate(urls):
-        out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url), "json")
-        cmd = None
-        try:
-            baseline = probe_random_paths(url, int(config.get("ffuf_baseline_count", 3)), settings.headers, settings.proxy)
-            baseline_out = raw_path(scan.id, "ffuf", re.sub(r"[^a-zA-Z0-9_.-]", "_", url) + "-baseline", "json")
-            baseline_out.write_text(json.dumps({"base_url": url, "wildcard_baseline": baseline}, indent=2), encoding="utf-8")
-            record_raw(db, scan.id, "ffuf", "ffuf-baseline", baseline_out)
-            derived_filters = derive_ffuf_filters(baseline)
-            filter_size = config.get("ffuf_filter_size") or derived_filters.get("filter_size")
-            filter_words = config.get("ffuf_filter_words") or derived_filters.get("filter_words")
-            filter_lines = config.get("ffuf_filter_lines") or derived_filters.get("filter_lines")
-            cmd = build_ffuf_command(
-                url,
-                resolved_wordlist.path,
-                out,
-                config.get("extensions", ""),
-                bool(config.get("ffuf_recursive", False)),
-                config.get("ffuf_match_codes", "all"),
-                filter_size,
-                int(config.get("ffuf_threads", 25)),
-                config.get("ffuf_rate"),
-                settings.headers,
-                settings.proxy,
-                bool(config.get("ffuf_auto_calibration", True)),
-                filter_words,
-                filter_lines,
-            )
-            run_command(cmd, timeout=int(config.get("ffuf_host_timeout", 3600)))
-            record_raw(db, scan.id, "ffuf", "ffuf", out)
-            seen_keys: set[tuple] = set()
-            for item in parse_ffuf_json(out.read_text(errors="ignore")):
-                if not item.get("url"):
-                    continue
-                item = classify_ffuf_result(item, baseline)
-                item["normalized_path"] = normalize_content_path(item.get("normalized_path") or item.get("path"))
-                item["method"] = item.get("method") or "GET"
-                dedupe_key = (url, item.get("normalized_path"), item.get("method"))
-                if dedupe_key in seen_keys:
-                    continue
-                seen_keys.add(dedupe_key)
-                existing = db.query(models.DirbResult).filter_by(scan_id=scan.id, base_url=url, normalized_path=item.get("normalized_path"), method=item.get("method")).one_or_none()
-                if existing:
-                    continue
-                prior = db.query(models.DirbResult).filter_by(target_id=scan.target_id, normalized_path=item.get("normalized_path"), method=item.get("method")).order_by(models.DirbResult.id.asc()).first()
-                db.add(models.DirbResult(target_id=scan.target_id, scan_id=scan.id, base_url=url, first_seen_scan_id=prior.first_seen_scan_id if prior else scan.id, headers_sent=settings.headers, **item))
-            db.commit()
-            stats["successful_hosts"] += 1
-        except Exception as e:
-            db.rollback()
-            stats["failed_hosts"] += 1
-            err = {"url": url, "command": cmd, "error": str(e), "error_type": type(e).__name__}
-            stats["errors"].append(err)
-            out.write_text(json.dumps(err, indent=2), encoding="utf-8")
-            record_raw(db, scan.id, "ffuf", "ffuf-error", out)
+    if not urls:
+        return stats
+
+    # Pre-load existing dirb results for fast dedup
+    existing_paths: set[tuple[str, str, str]] = set()
+    for r in db.query(models.DirbResult.base_url, models.DirbResult.normalized_path, models.DirbResult.method).filter_by(scan_id=scan.id).all():
+        existing_paths.add((r.base_url, r.normalized_path, r.method))
+
+    prior_dirb_cache: dict[tuple[str, str], int] = {}
+    results: list[dict | None] = []
+    with ThreadPoolExecutor(max_workers=SCAN_FFUF_PARALLEL) as exc:
+        future_map = {exc.submit(_ffuf_host, db, scan, url, config, settings, resolved_wordlist): url for url in urls}
+        for future in as_completed(future_map):
+            r = future.result()
+            results.append(r)
+            if r and "items" in r:
+                stats["successful_hosts"] += 1
+                record_raw(db, scan.id, "ffuf", "ffuf", r["out"])
+                record_raw(db, scan.id, "ffuf", "ffuf-baseline", r["baseline_out"])
+            elif r and "error" in r:
+                stats["failed_hosts"] += 1
+                stats["errors"].append(r)
+                record_raw(db, scan.id, "ffuf", "ffuf-error", r["out"])
+
+    # Batch insert all dirb results
+    to_add = []
+    for r in results:
+        if not r or "items" not in r:
             continue
+        url = r["url"]
+        for item in r["items"]:
+            dedupe_key = (url, item.get("normalized_path"), item.get("method"))
+            if dedupe_key in existing_paths:
+                continue
+            existing_paths.add(dedupe_key)
+            cache_key = (item.get("normalized_path"), item.get("method"))
+            if cache_key not in prior_dirb_cache:
+                prior = db.query(models.DirbResult).filter_by(
+                    target_id=scan.target_id, normalized_path=cache_key[0], method=cache_key[1]
+                ).order_by(models.DirbResult.id.asc()).first()
+                prior_dirb_cache[cache_key] = prior.first_seen_scan_id if prior else scan.id
+            to_add.append(models.DirbResult(
+                target_id=scan.target_id, scan_id=scan.id, base_url=url,
+                first_seen_scan_id=prior_dirb_cache[cache_key],
+                headers_sent=settings.headers, **item
+            ))
+            if len(to_add) >= SCAN_BATCH_SIZE:
+                for obj in to_add:
+                    db.add(obj)
+                db.flush()
+                to_add.clear()
+    for obj in to_add:
+        db.add(obj)
+    db.commit()
     return stats
 
 def run_screenshots(db: Session, scan: models.Scan) -> None:
@@ -316,15 +493,18 @@ def run_screenshots(db: Session, scan: models.Scan) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     infile.write_text("\n".join(urls))
     try:
-        run_command(build_gowitness_command(infile, outdir, settings.user_agent, settings.proxy), timeout=3600)
+        run_command(build_gowitness_command(infile, outdir, settings.user_agent, settings.proxy), timeout=3600, scan_id=scan.id)
     except Exception as e:
         err = raw_path(scan.id, "screenshots", "gowitness-error")
         err.write_text(str(e)); record_raw(db, scan.id, "screenshots", "gowitness-error", err)
         raise
     images = list(outdir.glob("*.png")) + list(outdir.glob("*.jpg")) + list(outdir.glob("*.jpeg"))
+    to_add = []
     for image in images:
         stem = image.stem.replace("_", "://", 1) if "_" in image.stem else image.stem
-        db.add(models.Screenshot(target_id=scan.target_id, scan_id=scan.id, url=stem, image_path=str(image)))
+        to_add.append(models.Screenshot(target_id=scan.target_id, scan_id=scan.id, url=stem, image_path=str(image)))
+    for obj in to_add:
+        db.add(obj)
     db.commit()
 
 def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> None:
@@ -352,8 +532,8 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         else:
             set_scan(db, scan, "complete", 100, "complete")
     except Exception as e:
-        progress = getattr(scan, "progress", 0) or 0
         db.rollback()
         scan = db.get(models.Scan, scan_id)
         if scan:
+            progress = scan.progress or 0
             scan.finished_at = datetime.now(UTC); set_scan(db, scan, "failed", progress, "failed", str(e))

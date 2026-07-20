@@ -1,6 +1,7 @@
 import csv
 import io
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -15,6 +16,7 @@ from app.schemas import InterestingPatch, RunScanRequest, Settings, StageRerunRe
 from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
+from app.recon.runner import cancel_scan
 from app.recon.wordlists import FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
 from app.docker_logs import LOG_VIEWER_DISABLED, list_allowed_containers, stream_logs, validate_container_selection, viewer_enabled, clamp_tail
 
@@ -121,6 +123,20 @@ def scan_status(scan_id: int, db: Session = Depends(get_db)):
     if not scan:
         raise HTTPException(404, "scan not found")
     return {"id": scan.id, "target_id": scan.target_id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error, "created_at": scan.created_at, "started_at": scan.started_at, "finished_at": scan.finished_at}
+
+@app.post("/api/scans/{scan_id}/cancel")
+def cancel_scan_endpoint(scan_id: int, db: Session = Depends(get_db)):
+    scan = db.get(models.Scan, scan_id)
+    if not scan:
+        raise HTTPException(404, "scan not found")
+    if scan.status not in ("queued", "running"):
+        raise HTTPException(400, "scan is not running")
+    killed = cancel_scan(scan_id)
+    scan.status = "cancelled"
+    scan.stage = "cancelled"
+    scan.finished_at = datetime.now(UTC)
+    db.commit()
+    return {"ok": True, "scan_id": scan_id, "processes_killed": killed}
 
 @app.get("/api/targets")
 def targets(db: Session = Depends(get_db)):

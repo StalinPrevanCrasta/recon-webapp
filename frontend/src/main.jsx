@@ -16,10 +16,18 @@ async function j(url, options = {}) {
 }
 
 function usePoll(scanId, onTick) {
+  const intervalRef = React.useRef(null);
+  const tickCountRef = React.useRef(0);
   useEffect(() => {
     if (!scanId) return;
-    const id = setInterval(async () => onTick?.(), 2000);
-    return () => clearInterval(id);
+    tickCountRef.current = 0;
+    const fn = () => {
+      tickCountRef.current++;
+      onTick?.();
+    };
+    fn();
+    intervalRef.current = setInterval(fn, 2500);
+    return () => clearInterval(intervalRef.current);
   }, [scanId, onTick]);
 }
 
