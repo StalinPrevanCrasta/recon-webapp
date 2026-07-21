@@ -31,69 +31,69 @@
   --lh-relaxed: 1.625;
   --lh-loose: 1.75;
 
-  /* ── Color ────────────────────────────────────────────────── */
-  /* 60-30-10 rule: 60% neutral, 30% primary, 10% accent */
+  /* ── Color — 60-30-10 ────────────────────────────────────── */
+  /* 60% neutral, 30% cyan primary, 10% semantic accent */
 
-  /* Neutral palette (slate-based) */
-  --neutral-50: #f8fafc;
-  --neutral-100: #f1f5f9;
-  --neutral-200: #e2e8f0;
-  --neutral-300: #cbd5e1;
-  --neutral-400: #94a3b8;
-  --neutral-500: #64748b;
-  --neutral-600: #475569;
-  --neutral-700: #334155;
-  --neutral-800: #1e293b;
-  --neutral-900: #0f172a;
-  --neutral-950: #020617;
+  /* Neutral — deep indigo base, not slate, not black */
+  --neutral-50: #f0f4ff;
+  --neutral-100: #dce3f5;
+  --neutral-200: #b7c3db;
+  --neutral-300: #8fa0bf;
+  --neutral-400: #6b7da0;
+  --neutral-500: #4b5d7a;
+  --neutral-600: #35445c;
+  --neutral-700: #232f42;
+  --neutral-800: #161f2e;
+  --neutral-900: #0c1220;
+  --neutral-950: #070c14;
 
-  /* Primary (blue) */
-  --primary-50: #eff6ff;
-  --primary-100: #dbeafe;
-  --primary-200: #bfdbfe;
-  --primary-300: #93c5fd;
-  --primary-400: #60a5fa;
-  --primary-500: #3b82f6;
-  --primary-600: #2563eb;
-  --primary-700: #1d4ed8;
-  --primary-800: #1e40af;
-  --primary-900: #1e3a8a;
+  /* Primary — cyan/teal: terminal + security tool aesthetic */
+  --primary-50: #ecfeff;
+  --primary-100: #cffafe;
+  --primary-200: #a5f3fc;
+  --primary-300: #67e8f9;
+  --primary-400: #22d3ee;
+  --primary-500: #06b6d4;
+  --primary-600: #0891b2;
+  --primary-700: #0e7490;
+  --primary-800: #155e75;
+  --primary-900: #164e63;
 
-  /* Semantic colors */
-  --success: #22c55e;
-  --success-bg: rgba(34, 197, 94, 0.12);
-  --success-border: rgba(34, 197, 94, 0.4);
+  /* Semantic colors — high contrast for scan data */
+  --success: #10b981;
+  --success-bg: rgba(16, 185, 129, 0.12);
+  --success-border: rgba(16, 185, 129, 0.4);
   --warning: #f59e0b;
   --warning-bg: rgba(245, 158, 11, 0.12);
   --warning-border: rgba(245, 158, 11, 0.4);
-  --error: #ef4444;
-  --error-bg: rgba(239, 68, 68, 0.12);
-  --error-border: rgba(239, 68, 68, 0.4);
-  --info: #3b82f6;
-  --info-bg: rgba(59, 130, 246, 0.12);
-  --info-border: rgba(59, 130, 246, 0.4);
-  --purple: #a855f7;
-  --purple-bg: rgba(168, 85, 247, 0.12);
-  --purple-border: rgba(168, 85, 247, 0.4);
+  --error: #fb7185;
+  --error-bg: rgba(251, 113, 133, 0.12);
+  --error-border: rgba(251, 113, 133, 0.4);
+  --info: #06b6d4;
+  --info-bg: rgba(6, 182, 212, 0.12);
+  --info-border: rgba(6, 182, 212, 0.4);
+  --purple: #a78bfa;
+  --purple-bg: rgba(167, 139, 250, 0.12);
+  --purple-border: rgba(167, 139, 250, 0.4);
   --hot: #fb7185;
   --hot-bg: rgba(251, 113, 133, 0.12);
   --hot-border: rgba(251, 113, 133, 0.4);
-  --cyan: #38bdf8;
-  --cyan-bg: rgba(56, 189, 248, 0.12);
-  --cyan-border: rgba(56, 189, 248, 0.4);
+  --cyan: #22d3ee;
+  --cyan-bg: rgba(34, 211, 238, 0.12);
+  --cyan-border: rgba(34, 211, 238, 0.4);
 
   /* ── Dark mode surface tokens ─────────────────────────────── */
-  --bg-base: var(--neutral-900);      /* page background */
-  --bg-surface: var(--neutral-950);   /* card/panel surface */
-  --bg-elevated: #1a2332;             /* elevated surface */
-  --bg-hover: var(--neutral-800);     /* hover state */
-  --bg-input: #0c1424;                /* input background */
-  --border-subtle: var(--neutral-800);
-  --border-default: var(--neutral-700);
+  --bg-base: #080c18;                    /* deep navy page */
+  --bg-surface: #0d1225;                 /* card/panel surface */
+  --bg-elevated: #141c32;                /* raised surface */
+  --bg-hover: #1c2640;                   /* hover state */
+  --bg-input: #0a0f1f;                   /* input background */
+  --border-subtle: #1a2440;
+  --border-default: #283352;
   --border-accent: var(--primary-500);
-  --text-primary: var(--neutral-100);
-  --text-secondary: var(--neutral-400);
-  --text-muted: var(--neutral-500);
+  --text-primary: #e8edf5;
+  --text-secondary: #8899bb;
+  --text-muted: #556688;
   --text-link: var(--primary-300);
 
   /* ── Border radius ─────────────────────────────────────────── */
@@ -224,7 +224,7 @@ button.small {
   min-height: 32px;
 }
 
-/* Primary CTA */
+/* Primary CTA — cyan terminal accent */
 .primary {
   background: linear-gradient(135deg, var(--primary-600), var(--primary-700));
   border-color: var(--primary-500);
@@ -240,6 +240,10 @@ button.small {
 .primary:active {
   background: linear-gradient(135deg, var(--primary-700), var(--primary-800));
   transform: scale(0.98);
+}
+
+.primary:focus-visible {
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.3);
 }
 
 /* Secondary */
@@ -729,7 +733,7 @@ h1 {
 .bar span {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, var(--success), var(--info));
+  background: linear-gradient(90deg, var(--primary-500), var(--primary-400));
   border-radius: var(--radius-full);
   transition: width 0.5s ease;
 }
@@ -875,7 +879,8 @@ h1 {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   Data Table
+   Data Table — Signature Element
+   Full monospace for authentic security-tool feel
    ═══════════════════════════════════════════════════════════════ */
 
 table {
@@ -884,7 +889,7 @@ table {
   border-spacing: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-md);
   overflow: hidden;
   margin-bottom: var(--space-md);
 }
@@ -904,17 +909,21 @@ td {
 }
 
 th {
-  background: #131d2e;
+  background: var(--bg-elevated);
   color: var(--text-muted);
   font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   white-space: nowrap;
+  font-family: var(--font-sans);
 }
 
+/* Signature: all table data in monospace — reads like terminal output */
 td {
   font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  line-height: var(--lh-relaxed);
 }
 
 tr:last-child td {
@@ -926,7 +935,7 @@ tr:nth-child(even) td {
 }
 
 tr:hover td {
-  background: rgba(59, 130, 246, 0.06);
+  background: rgba(6, 182, 212, 0.04);
 }
 
 tr.new td {
@@ -939,23 +948,42 @@ tr.new td {
   gap: var(--space-sm);
 }
 
+/* Terminal-style host indicator dot */
+.host-cell::before {
+  content: '';
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* Green dot for live hosts in the Live Hosts tab */
+.workspace h3 + table .host-cell::before {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
 .favicon {
   display: inline-grid;
   place-items: center;
   min-width: 28px;
   height: 28px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, var(--primary-600), var(--cyan));
+  background: linear-gradient(135deg, var(--primary-700), var(--primary-500));
   font-weight: 700;
-  font-size: var(--text-xs);
-  color: #fff;
+  font-size: 0.625rem;
+  color: var(--primary-200);
   flex-shrink: 0;
+  font-family: var(--font-mono);
 }
 
 .subtext,
 .muted {
   color: var(--text-muted);
   font-size: var(--text-xs);
+  font-family: var(--font-mono);
 }
 
 .subtext {
@@ -972,7 +1000,7 @@ tr.new td {
 
 .actions {
   white-space: nowrap;
-  opacity: 0.35;
+  opacity: 0.3;
   transition: opacity var(--transition-fast);
 }
 
@@ -1228,7 +1256,7 @@ tr:hover .actions,
   display: block;
   height: 6px;
   border-radius: var(--radius-full);
-  background: linear-gradient(90deg, var(--info), var(--success));
+  background: linear-gradient(90deg, var(--primary-500), var(--primary-400));
 }
 
 .bar-row em {
