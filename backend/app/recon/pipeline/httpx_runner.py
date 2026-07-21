@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.recon.pipeline.paths import raw_path, record_raw
 from app.recon.runner import run_command
-from app.recon.settings_store import load_settings
+from app.settings_store import load_settings
 from app.recon.wrappers import build_httpx_command, parse_httpx_jsonl
 
 logger = logging.getLogger(__name__)

@@ -11,7 +11,7 @@ from app import models
 from app.recon.pipeline.constants import SCAN_BATCH_SIZE, SCAN_FFUF_PARALLEL
 from app.recon.pipeline.paths import raw_path, record_raw
 from app.recon.runner import run_command
-from app.recon.settings_store import load_settings
+from app.settings_store import load_settings
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.recon.wrappers import build_ffuf_command, normalize_content_path, parse_ffuf_json
 
