@@ -17,7 +17,7 @@ from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
 from app.recon.runner import cancel_scan
-from app.recon.wordlists import FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
+from app.recon.wordlists import BUNDLED_FFUF_WORDLIST, FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
 from app.docker_logs import LOG_VIEWER_DISABLED, list_allowed_containers, stream_logs, validate_container_selection, viewer_enabled, clamp_tail
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
@@ -27,11 +27,28 @@ SCREEN_DIR = DATA_DIR / "screenshots"
 app = FastAPI(title="Bug Bounty Recon Webapp")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+BUNDLED_SUBDOMAIN_WORDLIST = Path("/app/wordlists/default/subdomains.txt")
+
 @app.on_event("startup")
 def startup():
     init_db()
     WORDLIST_DIR.mkdir(parents=True, exist_ok=True)
     SCREEN_DIR.mkdir(parents=True, exist_ok=True)
+    # Seed bundled wordlists into the database so they're available without manual upload
+    from app.db import SessionLocal
+    seed_db = SessionLocal()
+    try:
+        for kind, path, name in [
+            ("dirb", BUNDLED_FFUF_WORDLIST, BUNDLED_FFUF_WORDLIST.name),
+            ("subdomain", BUNDLED_SUBDOMAIN_WORDLIST, BUNDLED_SUBDOMAIN_WORDLIST.name),
+        ]:
+            if path.exists():
+                exists_q = seed_db.query(models.Wordlist).filter_by(kind=kind, name=name, path=str(path))
+                if not exists_q.first():
+                    seed_db.add(models.Wordlist(kind=kind, name=name, path=str(path)))
+                    seed_db.commit()
+    finally:
+        seed_db.close()
 
 app.mount("/screenshots", StaticFiles(directory=str(SCREEN_DIR), check_dir=False), name="screenshots")
 

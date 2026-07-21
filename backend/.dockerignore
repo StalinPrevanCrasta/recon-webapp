@@ -20,6 +20,7 @@ tests/
 wordlists/*
 !wordlists/default/
 !wordlists/default/common.txt
+!wordlists/default/subdomains.txt
 Dockerfile
 worker.Dockerfile
 .dockerignore

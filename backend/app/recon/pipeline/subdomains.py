@@ -9,7 +9,7 @@ from app import models
 from app.recon.pipeline.constants import DEFAULT_RESOLVERS, SCAN_CONCURRENT_ENUM
 from app.recon.pipeline.paths import raw_path, record_raw
 from app.recon.runner import run_command
-from app.recon.wrappers import build_amass_command, build_puredns_command, build_subfinder_command
+from app.recon.wrappers import build_subfinder_command, build_puredns_command
 
 
 def clean_domain(domain: str) -> str:
@@ -103,6 +103,21 @@ def _run_enum_tool(name: str, builder, domain, out, timeout, scan_id: int):
         return name, False, str(e)
 
 
+def _parse_tool_output(out: Path, seen: set[str]) -> list[tuple[str, str, int]]:
+    """Read a tool output file and return (name, source, depth) tuples for valid new subdomains."""
+    batch = []
+    try:
+        for line in out.read_text(errors="ignore").splitlines():
+            clean = line.strip().lower()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            batch.append((clean, out.stem, 0))
+    except (FileNotFoundError, OSError):
+        pass
+    return batch
+
+
 def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     config = scan.config or {}
     target = scan.target
@@ -111,16 +126,16 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     depth_max = int(config.get("recursion_depth", 2))
     tool_timeouts = {
         "subfinder": int(config.get("subfinder_timeout", 300)),
-        "amass": int(config.get("amass_timeout", 120)),
     }
     seen: set[str] = set()
 
-    # Run enumeration tools concurrently (crtsh runs outside the pool since it's a fast HTTP call)
+    # Run subfinder — the primary passive tool (amass consistently fails in this env)
+    # crtsh runs alongside in the main thread since it's a fast HTTP call
     tool_results: list[tuple[str, Path]] = []
     tool_path_map: dict[str, Path] = {}
     with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
         futures = {}
-        for tool, builder in [("subfinder", build_subfinder_command), ("amass", build_amass_command)]:
+        for tool, builder in [("subfinder", build_subfinder_command)]:
             out = raw_path(scan.id, "subdomains", tool)
             tool_results.append((tool, out))
             tool_path_map[tool] = out
@@ -138,32 +153,16 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
                 tool_out = tool_path_map.get(tool_name, out)
                 record_raw(db, scan.id, "subdomains", f"{tool_name}-error", tool_out)
 
-    # crtsh runs in the main thread immediately — it's a fast HTTP request, not a slow tool
-    ct_result = crtsh(domain)
-
-    # Process subfinder/amass output — read each file once
-    batch_names = []
-    for tool, out in tool_results:
-        seen_in_file: set[str] = set()
-        for line in out.read_text(errors="ignore").splitlines():
-            clean = line.strip().lower()
-            if not clean or clean in seen_in_file:
-                continue
-            seen_in_file.add(clean)
-            seen.add(clean)
-            batch_names.append((clean, tool, 0))
+    # Process subfinder output immediately
+    batch_names = _parse_tool_output(tool_results[0][1], seen)
     batch_upsert_subdomains(db, target.id, scan.id, batch_names)
 
-    # Process crtsh results
+    # crtsh runs in the main thread — fast HTTP request
+    ct_result = crtsh(domain)
     ctout = raw_path(scan.id, "subdomains", "crtsh")
     ctout.write_text("\n".join(sorted(ct_result)))
     record_raw(db, scan.id, "subdomains", "crtsh", ctout)
-    batch_ct = []
-    for name in ct_result:
-        clean = name.strip().lower()
-        if clean:
-            seen.add(clean)
-            batch_ct.append((clean, "crtsh", 0))
+    batch_ct = _parse_tool_output(ctout, seen)
     batch_upsert_subdomains(db, target.id, scan.id, batch_ct)
     db.commit()
 
@@ -181,16 +180,13 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
                         timeout=1800, scan_id=scan.id,
                     )
                     record_raw(db, scan.id, f"subdomains-depth-{depth}", "puredns", out)
-                    for name in out.read_text(errors="ignore").splitlines():
-                        if name and name not in seen:
-                            seen.add(name)
-                            next_frontier.add(name)
+                    batch = _parse_tool_output(out, seen)
+                    if batch:
+                        batch_upsert_subdomains(db, target.id, scan.id, batch)
+                        next_frontier.update(name for name, _, _ in batch)
                 except Exception as e:
                     out.write_text(str(e))
                     record_raw(db, scan.id, f"subdomains-depth-{depth}", "puredns-error", out)
-            if next_frontier:
-                batch_next = [(name, "puredns", depth) for name in next_frontier]
-                batch_upsert_subdomains(db, target.id, scan.id, batch_next)
             # Mutations
             batch_mut = []
             for name in mutate_names(next_frontier or frontier, domain):
