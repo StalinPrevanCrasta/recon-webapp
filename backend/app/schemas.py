@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
 
 class Settings(BaseModel):
     user_agent: str = "recon-webapp/1.0"
@@ -6,13 +7,10 @@ class Settings(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     proxy: str | None = None
 
-class RunScanRequest(BaseModel):
-    domain: str
-    subdomain_wordlist_id: int | None = None
+
+class FfufOptions(BaseModel):
+    """Shared FFUF configuration used across both full scans and stage reruns."""
     dirb_wordlist_id: int | None = None
-    recursion_depth: int = Field(default=2, ge=0, le=5)
-    subfinder_timeout: int = Field(default=300, ge=30, le=1800)
-    amass_timeout: int = Field(default=120, ge=30, le=1800)
     extensions: str = ""
     ffuf_recursive: bool = False
     ffuf_match_codes: str = "all"
@@ -24,27 +22,55 @@ class RunScanRequest(BaseModel):
     ffuf_host_timeout: int = Field(default=300, ge=30, le=3600)
     ffuf_threads: int = Field(default=20, ge=1, le=200)
     ffuf_rate: int | None = Field(default=None, ge=1)
+    subset_urls: list[str] | None = None
+
+
+class RunScanRequest(BaseModel):
+    domain: str
+    subdomain_wordlist_id: int | None = None
+    recursion_depth: int = Field(default=2, ge=0, le=5)
+    subfinder_timeout: int = Field(default=300, ge=30, le=1800)
+    amass_timeout: int = Field(default=120, ge=30, le=1800)
     run_ffuf: bool = True
     run_screenshots: bool = True
-    subset_urls: list[str] | None = None
+    ffuf: FfufOptions = Field(default_factory=FfufOptions)
+
+    @model_validator(mode="before")
+    @classmethod
+    def nest_ffuf_fields(cls, data: dict) -> dict:
+        """Allow flat JSON keys to populate the nested ffuf model."""
+        if not isinstance(data, dict):
+            return data
+        ffuf_keys = set(FfufOptions.model_fields.keys())
+        flat_ffuf = {k: v for k, v in data.items() if k in ffuf_keys}
+        if flat_ffuf:
+            existing = data.get("ffuf") or {}
+            if isinstance(existing, dict):
+                flat_ffuf.update(existing)
+            data["ffuf"] = flat_ffuf
+        return data
+
 
 class StageRerunRequest(BaseModel):
     stage: str
-    dirb_wordlist_id: int | None = None
     subfinder_timeout: int = 300
     amass_timeout: int = 120
-    extensions: str = ""
-    ffuf_recursive: bool = False
-    ffuf_match_codes: str = "all"
-    ffuf_filter_size: str | None = None
-    ffuf_filter_words: str | None = None
-    ffuf_filter_lines: str | None = None
-    ffuf_auto_calibration: bool = True
-    ffuf_baseline_count: int = 3
-    ffuf_host_timeout: int = 300
-    ffuf_threads: int = 25
-    ffuf_rate: int | None = None
-    subset_urls: list[str] | None = None
+    ffuf: FfufOptions = Field(default_factory=FfufOptions)
+
+    @model_validator(mode="before")
+    @classmethod
+    def nest_ffuf_fields(cls, data: dict) -> dict:
+        if not isinstance(data, dict):
+            return data
+        ffuf_keys = set(FfufOptions.model_fields.keys())
+        flat_ffuf = {k: v for k, v in data.items() if k in ffuf_keys}
+        if flat_ffuf:
+            existing = data.get("ffuf") or {}
+            if isinstance(existing, dict):
+                flat_ffuf.update(existing)
+            data["ffuf"] = flat_ffuf
+        return data
+
 
 class InterestingPatch(BaseModel):
     interesting: bool = True

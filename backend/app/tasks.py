@@ -27,7 +27,6 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_routes={
         "run_scan": {"queue": "scan"},
-        "run_scan_stage": {"queue": "scan"},
     },
 )
 

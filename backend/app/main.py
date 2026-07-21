@@ -81,22 +81,33 @@ async def upload_wordlist(kind: str, file: UploadFile = File(...), db: Session =
     content = await file.read()
     dest.write_bytes(content)
     row = models.Wordlist(kind=kind, name=dest.name, path=str(dest))
-    db.add(row); db.commit(); db.refresh(row)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
     return {"id": row.id, "kind": row.kind, "name": row.name, "path": row.path}
 
 @app.post("/api/scans/run")
 def run_scan(req: RunScanRequest, db: Session = Depends(get_db)):
     if req.run_ffuf:
         try:
-            resolve_ffuf_wordlist(db, req.dirb_wordlist_id)
+            resolve_ffuf_wordlist(db, req.ffuf.dirb_wordlist_id)
         except ValueError:
             raise HTTPException(status_code=422, detail=FFUF_WORDLIST_UNAVAILABLE)
     domain = clean_domain(req.domain)
     target = db.query(models.Target).filter_by(domain=domain).one_or_none()
     if not target:
-        target = models.Target(domain=domain); db.add(target); db.commit(); db.refresh(target)
-    scan = models.Scan(target_id=target.id, status="queued", stage="queued", config=req.model_dump())
-    db.add(scan); db.commit(); db.refresh(scan)
+        target = models.Target(domain=domain)
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+    scan_config = req.model_dump()
+    # Flatten nested ffuf config for backward compat with existing scans
+    if isinstance(scan_config.get("ffuf"), dict):
+        scan_config.update(scan_config.pop("ffuf"))
+    scan = models.Scan(target_id=target.id, status="queued", stage="queued", config=scan_config)
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
     task = run_scan_task.delay(scan.id)
     return {"target_id": target.id, "scan_id": scan.id, "task_id": task.id}
 
@@ -104,16 +115,21 @@ def run_scan(req: RunScanRequest, db: Session = Depends(get_db)):
 def rerun_stage(scan_id: int, req: StageRerunRequest, db: Session = Depends(get_db)):
     if req.stage == "ffuf":
         try:
-            resolve_ffuf_wordlist(db, req.dirb_wordlist_id)
+            resolve_ffuf_wordlist(db, req.ffuf.dirb_wordlist_id)
         except ValueError:
             raise HTTPException(status_code=422, detail=FFUF_WORDLIST_UNAVAILABLE)
     parent = db.get(models.Scan, scan_id)
     if not parent:
         raise HTTPException(404, "scan not found")
     config = dict(parent.config or {})
-    config.update(req.model_dump())
+    req_data = req.model_dump()
+    if isinstance(req_data.get("ffuf"), dict):
+        req_data.update(req_data.pop("ffuf"))
+    config.update(req_data)
     scan = models.Scan(target_id=parent.target_id, status="queued", stage=f"queued:{req.stage}", config=config)
-    db.add(scan); db.commit(); db.refresh(scan)
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
     task = run_scan_task.delay(scan.id, req.stage)
     return {"scan_id": scan.id, "task_id": task.id}
 
@@ -198,7 +214,9 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         return {"target": {"id": target.id, "domain": target.domain}, "scans": [], "subdomains": [], "http": [], "dirs": [], "screenshots": [], "raw": []}
     prev = db.query(models.Scan).filter(models.Scan.target_id == target_id, models.Scan.id < scan.id).order_by(models.Scan.id.desc()).first()
     def rowdict(row, keys):
-        d = {k: getattr(row, k) for k in keys}; d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id and bool(prev); return d
+        d = {k: getattr(row, k) for k in keys}
+        d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id and bool(prev)
+        return d
     subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()]
     http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "response_size", "server", "redirect_chain", "ip", "headers_sent", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()]
     dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()]
@@ -251,10 +269,14 @@ def export(target_id: int, format: str = "json", db: Session = Depends(get_db)):
     if format == "json":
         return data
     if format == "csv":
-        buf = io.StringIO(); writer = csv.writer(buf)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
         writer.writerow(["type", "value", "status", "extra"])
-        for s in data["subdomains"]: writer.writerow(["subdomain", s["name"], "", ",".join(s["sources"])])
-        for h in data["http"]: writer.writerow(["http", h["url"], h["status_code"], ",".join(h["tech"] or [])])
-        for d in data["dirs"]: writer.writerow(["content_path", d["url"], d["status_code"], f"{d.get('confidence', '')} {d.get('size', '')}"])
+        for s in data["subdomains"]:
+            writer.writerow(["subdomain", s["name"], "", ",".join(s["sources"])])
+        for h in data["http"]:
+            writer.writerow(["http", h["url"], h["status_code"], ",".join(h["tech"] or [])])
+        for d in data["dirs"]:
+            writer.writerow(["content_path", d["url"], d["status_code"], f"{d.get('confidence', '')} {d.get('size', '')}"])
         return Response(buf.getvalue(), media_type="text/csv")
     raise HTTPException(400, "format must be json or csv")
