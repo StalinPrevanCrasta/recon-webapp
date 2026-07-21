@@ -115,7 +115,7 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     }
     seen: set[str] = set()
 
-    # Run enumeration tools concurrently
+    # Run enumeration tools concurrently (crtsh runs outside the pool since it's a fast HTTP call)
     tool_results: list[tuple[str, Path]] = []
     tool_path_map: dict[str, Path] = {}
     with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
@@ -125,23 +125,21 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
             tool_results.append((tool, out))
             tool_path_map[tool] = out
             futures[exc.submit(_run_enum_tool, tool, builder, domain, out, tool_timeouts.get(tool, 300), scan.id)] = tool
-        futures[exc.submit(crtsh, domain)] = "crtsh"
-        ct_result = set()
         for future in as_completed(futures):
             tool_name = futures[future]
             try:
                 result = future.result()
-                if tool_name == "crtsh":
-                    ct_result = result
+                tool_out = tool_path_map.get(tool_name, out)
+                if result[1]:
+                    record_raw(db, scan.id, "subdomains", tool_name, tool_out)
                 else:
-                    tool_out = tool_path_map.get(tool_name, out)
-                    if result[1]:
-                        record_raw(db, scan.id, "subdomains", tool_name, tool_out)
-                    else:
-                        record_raw(db, scan.id, "subdomains", f"{tool_name}-error", tool_out)
+                    record_raw(db, scan.id, "subdomains", f"{tool_name}-error", tool_out)
             except Exception:
                 tool_out = tool_path_map.get(tool_name, out)
                 record_raw(db, scan.id, "subdomains", f"{tool_name}-error", tool_out)
+
+    # crtsh runs in the main thread immediately — it's a fast HTTP request, not a slow tool
+    ct_result = crtsh(domain)
 
     # Process subfinder/amass output — read each file once
     batch_names = []
