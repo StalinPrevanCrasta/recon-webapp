@@ -15,6 +15,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
       RECON_DATA_DIR: /data
       DEFAULT_FFUF_WORDLIST: /usr/share/seclists/Discovery/Web-Content/common.txt
@@ -36,9 +37,24 @@ services:
       - "8000:8000"
     depends_on:
       - redis
+    develop:
+      watch:
+        - action: sync
+          path: ./backend/app
+          target: /app/app
+        - action: sync
+          path: ./backend/wordlists
+          target: /app/wordlists
+        - action: rebuild
+          path: ./backend/requirements.txt
+        - action: rebuild
+          path: ./backend/Dockerfile
     logging: *log-rotation
   worker:
     image: recon-webapp-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
     environment:
       RECON_DATA_DIR: /data
@@ -52,13 +68,46 @@ services:
       - ./raw-output:/data/raw
     depends_on:
       - redis
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./backend/app
+          target: /app/app
+        - action: sync+restart
+          path: ./backend/wordlists
+          target: /app/wordlists
+        - action: rebuild
+          path: ./backend/requirements.txt
+        - action: rebuild
+          path: ./backend/Dockerfile
     logging: *log-rotation
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    command: ["npm", "run", "dev"]
     ports:
-      - "3001:80"
+      - "3001:5173"
     depends_on:
       - backend
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend/src
+          target: /app/src
+        - action: sync
+          path: ./frontend/index.html
+          target: /app/index.html
+        - action: sync+restart
+          path: ./frontend/vite.config.mjs
+          target: /app/vite.config.mjs
+        - action: rebuild
+          path: ./frontend/package.json
+        - action: rebuild
+          path: ./frontend/package-lock.json
+        - action: rebuild
+          path: ./frontend/Dockerfile
     logging: *log-rotation
 volumes:
   redis-data:
