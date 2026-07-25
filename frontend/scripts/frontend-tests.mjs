@@ -15,5 +15,8 @@ assert.match(src, /Download/, 'logs page has download control');
 assert.match(src, /slice\(-bufferLimit\)/, 'maximum frontend buffer is enforced');
 assert.match(src, /highlight\(/, 'search highlighting is wired');
 assert.doesNotMatch(src, /dangerouslySetInnerHTML/, 'logs are not rendered with dangerouslySetInnerHTML');
+assert.match(src, /function TargetLoadingScreen\(/, 'target loading screen exists');
+assert.match(src, /setLoadingTarget\(t\)[\s\S]*targets\/\$\{t\.id\}\/results/, 'target results load only after the loading state is shown');
+assert.match(src, /Other targets remain unloaded/, 'loading screen explains lazy target loading');
 
 console.log('frontend log viewer static tests passed');

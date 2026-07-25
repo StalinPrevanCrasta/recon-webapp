@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './style.css';
 
@@ -122,6 +122,20 @@ function Badge({children, tone = 'muted'}) {
 function SidebarGroup({title, children, defaultOpen = true}) {
   const [open, setOpen] = useState(defaultOpen);
   return <div className="sidebar-group"><button className="group-title" onClick={() => setOpen(!open)}>{title}<span>{open ? 'Hide' : 'Show'}</span></button>{open && <div className="group-body">{children}</div>}</div>;
+}
+
+function TargetLoadingScreen({target}) {
+  if (!target) return null;
+  return <div className="target-loading-screen" role="dialog" aria-modal="true" aria-labelledby="target-loading-title" aria-live="polite">
+    <div className="target-loading-card">
+      <div className="target-loading-spinner" aria-hidden="true"><span /></div>
+      <span className="eyebrow">Opening workspace</span>
+      <h2 id="target-loading-title">Loading {target.domain}</h2>
+      <p>Fetching this target’s scans and results. Other targets remain unloaded.</p>
+      <div className="target-loading-progress" aria-label="Loading target data"><span /></div>
+      <small>Please keep this screen open.</small>
+    </div>
+  </div>;
 }
 
 function SummaryCards({result}) {
@@ -402,6 +416,8 @@ function App() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [detail, setDetail] = useState(null);
   const [alert, setAlert] = useState('');
+  const [loadingTarget, setLoadingTarget] = useState(null);
+  const targetLoadSequence = useRef(0);
   const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_ffuf: true, run_screenshots: true});
 
   const refresh = async () => {
@@ -422,7 +438,29 @@ function App() {
       setAlert(err.message || String(err));
     }
   }
-  async function loadTarget(t) { setActive(t); setDomain(t.domain); setResult(await j(`${API}/targets/${t.id}/results`)); }
+  async function loadTarget(t) {
+    if (!t || loadingTarget) return;
+    const sequence = ++targetLoadSequence.current;
+    setAlert('');
+    setLoadingTarget(t);
+    // Let the loading screen paint before starting a potentially large response.
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    try {
+      const nextResult = await j(`${API}/targets/${t.id}/results`);
+      if (sequence !== targetLoadSequence.current) return;
+      setDomain(t.domain);
+      setActive(t);
+      setResult(nextResult);
+      setScan(nextResult?.active_scan || null);
+      setDetail(null);
+      setSelectedIds(new Set());
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    } catch (err) {
+      if (sequence === targetLoadSequence.current) setAlert(`Could not load ${t.domain}: ${err.message || String(err)}`);
+    } finally {
+      if (sequence === targetLoadSequence.current) setLoadingTarget(null);
+    }
+  }
   async function deleteTarget(t) {
     const ok = window.confirm(`Delete target ${t.domain} and all scans/results/raw-output references for it? This cannot be undone.`);
     if (!ok) return;
@@ -451,10 +489,10 @@ function App() {
   const runDisabled = Boolean(runError) || scanRunning || !domain.trim();
 
   if (!active && !result && !scan) {
-    return <LandingPage domain={domain} setDomain={setDomain} run={run} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError} alert={alert}/>;
+    return <><LandingPage domain={domain} setDomain={setDomain} run={run} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError} alert={alert}/><TargetLoadingScreen target={loadingTarget}/></>;
   }
 
-  return <div className="app-shell">
+  return <><div className="app-shell">
     <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError}/>{alert && <div className="alert">{alert}</div>}
     <main className="layout"><aside className="sidebar">
       <SidebarGroup title="Marked Targets"><p className="muted">Mark rows during review. Target pinning is next.</p></SidebarGroup>
@@ -472,7 +510,7 @@ function App() {
       {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>} 
       {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>} 
     </section><DetailsPanel row={detail} result={result} close={() => setDetail(null)} markInteresting={markInteresting}/></main>
-  </div>;
+  </div><TargetLoadingScreen target={loadingTarget}/></>;
 }
 
 createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : <App/>);

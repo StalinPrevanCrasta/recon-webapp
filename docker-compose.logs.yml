@@ -1,0 +1,12 @@
+# Optional override for the Live Container Logs viewer.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.logs.yml up -d --build
+#
+# This mounts the host Docker socket into the backend container. Enable it only
+# on a trusted local machine; the default compose file does not mount the socket.
+services:
+  backend:
+    environment:
+      ENABLE_DOCKER_LOG_VIEWER: ${ENABLE_DOCKER_LOG_VIEWER:-true}
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
