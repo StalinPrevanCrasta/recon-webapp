@@ -102,8 +102,8 @@ function countBy(rows, getter) {
 function tagsFor(row) {
   const haystack = `${row.url || row.name || ''} ${row.title || ''} ${(row.tech || []).join(' ')}`.toLowerCase();
   const tags = [];
-  if (row.is_new) tags.push('NEW');
-  if (row.interesting) tags.push('🔥 Interesting');
+  if (row.is_new) tags.push('New');
+  if (row.interesting) tags.push('Marked');
   if (row.open_directory) tags.push('Index of');
   if (row.confidence === 'confirmed') tags.push('Confirmed');
   if (row.confidence === 'possible') tags.push('Possible');
@@ -121,7 +121,7 @@ function Badge({children, tone = 'muted'}) {
 
 function SidebarGroup({title, children, defaultOpen = true}) {
   const [open, setOpen] = useState(defaultOpen);
-  return <div className="sidebar-group"><button className="group-title" onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {title}</button>{open && <div className="group-body">{children}</div>}</div>;
+  return <div className="sidebar-group"><button className="group-title" onClick={() => setOpen(!open)}>{title}<span>{open ? 'Hide' : 'Show'}</span></button>{open && <div className="group-body">{children}</div>}</div>;
 }
 
 function SummaryCards({result}) {
@@ -140,12 +140,12 @@ function SummaryCards({result}) {
   const cdns = http.filter(h => /cloudflare|cloudfront|akamai|fastly/i.test((h.tech || []).join(' '))).length;
   return <>
     <div className="cards compact-cards">
-      <div className="card"><span className="card-icon">🌐</span><b>{subdomains}</b><span>Subdomains</span></div>
-      <div className="card"><span className="card-icon">🖥</span><b>{live}</b><span>Live Hosts</span></div>
-      <div className="card"><span className="card-icon">📷</span><b>{screenshots}</b><span>Screenshots</span></div>
-      <div className="card"><span className="card-icon">📂</span><b>{confirmedDirs}</b><span>Content Paths</span><small>{possibleDirs} possible · {filteredDirs} filtered</small></div>
-      <div className="card hot"><span className="card-icon">🔥</span><b>{interesting}</b><span>Interesting</span></div>
-      <div className="card warn"><span className="card-icon">⚠</span><b>{takeoverHints}</b><span>Takeover Hints</span></div>
+      <div className="card"><span className="card-label">DNS</span><b>{subdomains}</b><span>Subdomains</span></div>
+      <div className="card"><span className="card-label">HTTP</span><b>{live}</b><span>Live hosts</span></div>
+      <div className="card"><span className="card-label">VISUAL</span><b>{screenshots}</b><span>Screenshots</span></div>
+      <div className="card"><span className="card-label">PATHS</span><b>{confirmedDirs}</b><span>Content paths</span><small>{possibleDirs} possible · {filteredDirs} filtered</small></div>
+      <div className="card hot"><span className="card-label">MARKED</span><b>{interesting}</b><span>Marked</span></div>
+      <div className="card warn"><span className="card-label">RISK</span><b>{takeoverHints}</b><span>Takeover hints</span></div>
     </div>
     <div className="infra-stats"><Badge>IPs {ips}</Badge><Badge>Unique Tech {uniqueTech}</Badge><Badge>CDNs {cdns}</Badge><Badge>Cloud Providers {http.filter(h => /aws|azure|gcp|cloudflare/i.test((h.tech || []).join(' '))).length}</Badge></div>
   </>;
@@ -169,7 +169,7 @@ function ProgressPanel({scan, result}) {
     ['screenshots', 'Gowitness', `${screenshotCount} shots`],
   ];
   return <div className="progress-panel">
-    <div className="panel-title"><span>Recon Progress</span><Badge tone={status === 'failed' ? 'server' : status === 'partial' ? 'warn' : status === 'complete' ? 'ok' : 'redirect'}>{status}</Badge></div>
+    <div className="panel-title"><span>Scan pipeline</span><Badge tone={status === 'failed' ? 'server' : status === 'partial' ? 'warn' : status === 'complete' ? 'ok' : 'redirect'}>{status}</Badge></div>
     <div className="stage-list">{stages.map(([key, label, text]) => {
       const info = stageInfo[key] || {};
       const state = info.status || (stage.includes(key) && status === 'running' ? 'running' : 'not_started');
@@ -177,7 +177,7 @@ function ProgressPanel({scan, result}) {
       const active = state === 'running';
       const partial = state === 'partial';
       const failed = state === 'failed';
-      const marker = done ? '✓' : partial ? '◐' : failed ? '!' : active ? '●' : '○';
+      const marker = done ? 'Done' : partial ? 'Part' : failed ? 'Fail' : active ? 'Run' : 'Wait';
       const labelText = done ? 'Complete' : partial ? 'Partial' : failed ? 'Failed' : active ? 'Running…' : 'Not started';
       return <div key={key} className={`stage ${done ? 'done' : ''} ${active ? 'active' : ''} ${partial ? 'partial' : ''} ${failed ? 'failed' : ''}`}><span>{marker}</span><b>{label}</b><em>{text}</em><small>{labelText}</small></div>;
     })}</div>
@@ -193,7 +193,7 @@ function Header({domain, setDomain, run, result, targets, loadTarget, runDisable
   const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} content paths`;
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
-    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>▣ View Logs</button><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix Options' : 'Run Recon'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
+    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
   </header>;
 }
 
@@ -207,7 +207,7 @@ function Filters({filters, setFilters}) {
       <input placeholder="Technology" value={filters.tech} onChange={e => setFilters({...filters, tech: e.target.value})}/>
       <input placeholder="IP / ASN" value={filters.ip} onChange={e => setFilters({...filters, ip: e.target.value})}/>
     </div>
-    <div className="filter-chips">{chips.map(chip => <button key={chip} className={filters.chips.includes(chip) ? 'chip active' : 'chip'} onClick={() => toggleChip(chip)}>{filters.chips.includes(chip) ? '☑' : '☐'} {chip}</button>)}</div>
+    <div className="filter-chips">{chips.map(chip => <button key={chip} className={filters.chips.includes(chip) ? 'chip active' : 'chip'} onClick={() => toggleChip(chip)}>{chip}</button>)}</div>
   </>;
 }
 
@@ -247,16 +247,16 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
         <td>{row.ip || <span className="muted">—</span>}</td>
         <td><TechBadges tech={row.tech} /></td>
         <td>{(row.sources || []).join(', ') || row.base_url || <span className="muted">—</span>}</td>
-        <td>{tags.length ? tags.map(t => <Badge key={t} tone={t.includes('🔥') ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
+        <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
-        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>🌐</button><button onClick={() => copy(value)}>📋</button><button onClick={() => markInteresting(kind, row)}>⭐</button><button title="Screenshot">📸</button><button title="Run nuclei">⚡</button><button title="More">⋮</button></td>
+        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
       </tr>;
     })}</tbody></table>
   </>;
 }
 
 function ScreenshotGallery({rows, selectRow, markInteresting}) {
-  return <div className="gallery">{rows.map(s => <figure key={s.id} onClick={() => selectRow({...s, kind: 'screenshots'})}><a href={s.image_url} target="_blank" rel="noreferrer"><img src={s.image_url}/></a><figcaption><b>{hostFromUrl(s.url)}</b><div><Badge tone="ok">Screenshot</Badge>{s.interesting && <Badge tone="hot">🔥</Badge>}</div><button onClick={e => { e.preventDefault(); e.stopPropagation(); markInteresting('screenshots', s); }}>⭐ Bookmark</button></figcaption></figure>)}</div>;
+  return <div className="gallery">{rows.map(s => <figure key={s.id} onClick={() => selectRow({...s, kind: 'screenshots'})}><a href={s.image_url} target="_blank" rel="noreferrer"><img src={s.image_url}/></a><figcaption><b>{hostFromUrl(s.url)}</b><div><Badge tone="ok">Screenshot</Badge>{s.interesting && <Badge tone="hot">Marked</Badge>}</div><button onClick={e => { e.preventDefault(); e.stopPropagation(); markInteresting('screenshots', s); }}>Mark screenshot</button></figcaption></figure>)}</div>;
 }
 
 function RawConsole({rows}) {
@@ -278,7 +278,7 @@ function DetailsPanel({row, result, close, markInteresting}) {
   const value = row.url || row.name || row.image_path;
   const cdn = compactTech(row.tech).find(t => /cloudfront|cloudflare|akamai|fastly/i.test(t)) || '—';
   const asn = /amazon|aws|cloudfront|s3/i.test((row.tech || []).join(' ')) ? 'Amazon' : /cloudflare/i.test((row.tech || []).join(' ')) ? 'Cloudflare' : '—';
-  return <aside className="details"><button className="close" onClick={close}>×</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>🌐 Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>📋 Copy URL</button><button>📸 Screenshot</button><button>🔍 Whois</button><button>⚡ Run Nuclei</button><button>🕷 Crawl</button><button onClick={() => markInteresting(row.kind, row)}>⭐ Bookmark</button></div></aside>;
+  return <aside className="details"><button className="close" onClick={close}>Close</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
 }
 
 
@@ -339,6 +339,24 @@ function highlight(text, q) {
 
 function formatLogLine(line) {
   return `${line.timestamp || ''} ${line.container || ''} ${line.level || ''} ${line.message || ''}`;
+}
+
+function LandingPage({domain, setDomain, run, targets, loadTarget, runDisabled, runError, alert}) {
+  const examples = ['example.com', 'app.example.com', 'https://target.com'];
+  return <div className="landing-page">
+    <nav className="landing-nav"><b>Recon Radar</b><button className="secondary" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button></nav>
+    <section className="landing-hero">
+      <div className="landing-copy"><span className="eyebrow">Attack surface scanner</span><h1>Enter a target. Watch the surface resolve.</h1><p>Start with one domain and move into a focused scan workspace for subdomains, live hosts, content paths, screenshots, and raw output.</p></div>
+      <form className="target-launcher" onSubmit={e => { e.preventDefault(); if (!runDisabled) run(); }}>
+        <label>Target URL or domain</label>
+        <div className="launcher-row"><input autoFocus value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="primary" disabled={runDisabled}>{runDisabled ? 'Fix options' : 'Start scan'}</button></div>
+        {runError && <div className="inline-alert">{runError}</div>}
+        {alert && <div className="alert">{alert}</div>}
+        <div className="example-row"><span>Try</span>{examples.map(item => <button type="button" key={item} onClick={() => setDomain(item)}>{item}</button>)}</div>
+      </form>
+    </section>
+    <section className="landing-recents"><div><h2>Recent targets</h2><p>Select a previous target to open its scan workspace.</p></div><div className="recent-grid">{targets.slice(0, 8).map(t => <button key={t.id} onClick={() => loadTarget(t)}><b>{t.domain}</b><span>{t.scan_count} scans</span></button>)}{!targets.length && <p className="muted">No targets yet. Your first scan will appear here.</p>}</div></section>
+  </div>;
 }
 
 function LogsPage() {
@@ -404,7 +422,7 @@ function App() {
       setAlert(err.message || String(err));
     }
   }
-  async function loadTarget(t) { setActive(t); setResult(await j(`${API}/targets/${t.id}/results`)); }
+  async function loadTarget(t) { setActive(t); setDomain(t.domain); setResult(await j(`${API}/targets/${t.id}/results`)); }
   async function deleteTarget(t) {
     const ok = window.confirm(`Delete target ${t.domain} and all scans/results/raw-output references for it? This cannot be undone.`);
     if (!ok) return;
@@ -430,12 +448,16 @@ function App() {
   const defaultLabel = defaultName === 'common.txt' ? 'SecLists common.txt' : defaultName;
   const runError = opts.run_ffuf && !opts.dirb_wordlist_id && health && !defaultAvailable ? 'FFUF is enabled, but no selected or default directory wordlist is available.' : '';
   const ffufWordlistHint = opts.run_ffuf && !opts.dirb_wordlist_id && defaultAvailable ? `${defaultLabel} will be used automatically.` : '';
-  const runDisabled = Boolean(runError) || scanRunning;
+  const runDisabled = Boolean(runError) || scanRunning || !domain.trim();
 
-  return <div>
+  if (!active && !result && !scan) {
+    return <LandingPage domain={domain} setDomain={setDomain} run={run} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError} alert={alert}/>;
+  }
+
+  return <div className="app-shell">
     <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError}/>{alert && <div className="alert">{alert}</div>}
     <main className="layout"><aside className="sidebar">
-      <SidebarGroup title="⭐ Favorite Targets"><p className="muted">Bookmark rows with ⭐. Favorite target pinning is next.</p></SidebarGroup>
+      <SidebarGroup title="Marked Targets"><p className="muted">Mark rows during review. Target pinning is next.</p></SidebarGroup>
       <SidebarGroup title="Recent Targets">{targets.map(t => <div className="target-row" key={t.id}><button className="target" onClick={() => loadTarget(t)}>{t.domain}<span>{t.scan_count} scans</span></button><button className="danger small" title={`Delete ${t.domain}`} onClick={() => deleteTarget(t)}>Delete</button></div>)}</SidebarGroup>
       <SidebarGroup title="Scan History">{(result?.scans || []).map(s => <button className="target scan-history-item" key={s.id} onClick={() => j(`${API}/targets/${active.id}/results?scan_id=${s.id}`).then(setResult)}><b>Scan #{s.id}</b><span>{ago(s.created_at)} · {s.status}</span></button>)}</SidebarGroup>
       <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select value={opts.dirb_wordlist_id || ''} onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Default — {defaultLabel}</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>{ffufWordlistHint && <p className="hint">{ffufWordlistHint}</p>}{!defaultAvailable && opts.run_ffuf && !opts.dirb_wordlist_id && health && <p className="inline-alert">Default FFUF wordlist unavailable. Upload/select a dirb wordlist.</p>}</SidebarGroup>

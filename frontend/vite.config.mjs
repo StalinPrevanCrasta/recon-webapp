@@ -11,6 +11,10 @@ export default defineConfig({
         target: 'http://backend:8000',
         changeOrigin: true,
       },
+      '/screenshots': {
+        target: 'http://backend:8000',
+        changeOrigin: true,
+      },
     },
   },
 });
