@@ -78,6 +78,46 @@ def parse_naabu_jsonl(text: str) -> list[dict]:
     return rows
 
 
+def build_wappalyzer_command(input_file: Path, output_file: Path, scan_type: str = "balanced", workers: int = 5) -> list[str]:
+    return ["wappalyzer", "-i", str(input_file), "--scan-type", scan_type, "-w", str(workers), "-oJ", str(output_file)]
+
+
+def parse_wappalyzer_json(text: str) -> dict[str, list[str]]:
+    if not text.strip():
+        return {}
+    data = json.loads(text)
+    results: dict[str, list[str]] = {}
+
+    def tech_names(value) -> list[str]:
+        if isinstance(value, list):
+            names = []
+            for item in value:
+                if isinstance(item, str):
+                    names.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("technology") or item.get("slug")
+                    if name:
+                        names.append(str(name))
+            return names
+        if isinstance(value, dict):
+            return tech_names(value.get("technologies") or value.get("tech") or value.get("detected") or [])
+        return []
+
+    if isinstance(data, dict):
+        for url, value in data.items():
+            if isinstance(value, dict) and (value.get("url") or value.get("target")):
+                results[str(value.get("url") or value.get("target"))] = tech_names(value)
+            else:
+                results[str(url)] = tech_names(value)
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                url = item.get("url") or item.get("target") or item.get("input")
+                if url:
+                    results[str(url)] = tech_names(item)
+    return {url: sorted(set(names)) for url, names in results.items() if names}
+
+
 def normalize_content_path(path: str | None) -> str | None:
     if path is None:
         return None

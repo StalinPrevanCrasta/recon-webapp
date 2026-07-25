@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, build_naabu_command, build_subfinder_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl
+from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, build_naabu_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_wappalyzer_json
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -47,6 +47,17 @@ def test_naabu_command_and_jsonl_parser(tmp_path):
         "port": 8080,
         "protocol": "tcp",
     }]
+
+
+def test_wappalyzer_balanced_command_and_json_parser(tmp_path):
+    infile = tmp_path / "urls.txt"
+    outfile = tmp_path / "wappalyzer.json"
+    cmd = build_wappalyzer_command(infile, outfile, "balanced", 5)
+
+    assert cmd == ["wappalyzer", "-i", str(infile), "--scan-type", "balanced", "-w", "5", "-oJ", str(outfile)]
+    assert parse_wappalyzer_json('{"https://a.example":[{"name":"Strapi"},{"name":"Nginx"}]}') == {
+        "https://a.example": ["Nginx", "Strapi"]
+    }
 
 
 def test_parse_httpx_jsonl_extracts_required_fields():

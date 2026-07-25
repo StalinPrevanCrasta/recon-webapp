@@ -56,6 +56,7 @@ def test_execute_scan_records_failure_when_ffuf_validation_fails(monkeypatch):
     monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: ["a.example"])
     monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: ["https://a.example"])
+    monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: {})
 
     db = SessionLocal()
     try:
@@ -198,6 +199,7 @@ def test_execute_scan_clears_stale_raw_files_for_reused_scan_id(monkeypatch, tmp
     monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: [])
+    monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: {})
 
     db = SessionLocal()
     try:
@@ -249,6 +251,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: events.append("subdomains") or ["a.example"])
     monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: events.append("naabu") or [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
+    monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: events.append("wappalyzer") or {})
     monkeypatch.setattr(pipeline, "run_ffuf", lambda db, scan, urls=None: events.append("ffuf") or {"successful_hosts": 0, "failed_hosts": 1, "errors": [{"url": "https://a.example", "error": "timeout"}]})
     monkeypatch.setattr(pipeline, "run_screenshots", lambda db, scan: events.append("screenshots"))
 
@@ -256,9 +259,27 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     try:
         pipeline.execute_scan(db, scan_id)
         row = db.get(models.Scan, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "ffuf", "screenshots"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "ffuf", "screenshots"]
         assert row.status == "partial"
         assert row.stage == "partial"
         assert "FFUF had 1 host failure" in row.error
+    finally:
+        db.close()
+
+
+def test_execute_scan_always_runs_wappalyzer_after_httpx(monkeypatch):
+    db, _, scan = make_scan({"run_wappalyzer": False, "run_ffuf": False, "run_screenshots": False})
+    scan_id = scan.id
+    db.close()
+    events = []
+    monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: events.append("subdomains") or ["a.example"])
+    monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: events.append("naabu") or [])
+    monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
+    monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: events.append("wappalyzer") or {})
+
+    db = SessionLocal()
+    try:
+        pipeline.execute_scan(db, scan_id)
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer"]
     finally:
         db.close()

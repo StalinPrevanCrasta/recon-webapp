@@ -169,6 +169,7 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
         "subdomains": {"status": stage_state("subdomains", len(subdomains)), "results": len(subdomains)},
         "naabu": {"status": stage_state("naabu", 0), "results": len([r for r in raw_by_stage.get("naabu", []) if r.tool == "naabu"])},
         "httpx": {"status": stage_state("httpx", len(http)), "results": len(http), "total": len(subdomains)},
+        "wappalyzer": {"status": stage_state("wappalyzer", len([h for h in http if h.get("tech")])), "results": len([h for h in http if h.get("tech")]), "total": len(http)},
         "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status == "running" else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": len(ffuf_success), "failed_hosts": len(ffuf_errors), "total": len(http)},
         "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots)},
     }

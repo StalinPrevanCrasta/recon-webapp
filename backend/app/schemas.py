@@ -17,6 +17,9 @@ class RunScanRequest(BaseModel):
     run_naabu: bool = True
     naabu_ports: str = "80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443"
     naabu_timeout: int = Field(default=1800, ge=30, le=7200)
+    wappalyzer_scan_type: str = "balanced"
+    wappalyzer_workers: int = Field(default=5, ge=1, le=20)
+    wappalyzer_timeout: int = Field(default=1800, ge=30, le=7200)
     amass_timeout: int = Field(default=120, ge=30, le=1800)
     extensions: str = ""
     ffuf_recursive: bool = False
@@ -44,6 +47,9 @@ class StageRerunRequest(BaseModel):
     run_naabu: bool = True
     naabu_ports: str = "80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443"
     naabu_timeout: int = 1800
+    wappalyzer_scan_type: str = "balanced"
+    wappalyzer_workers: int = 5
+    wappalyzer_timeout: int = 1800
     extensions: str = ""
     ffuf_recursive: bool = False
     ffuf_match_codes: str = "all"

@@ -180,8 +180,10 @@ function ProgressPanel({scan, result}) {
   const stage = scan?.stage || 'queued';
   const status = scan?.status || 'idle';
   const stageInfo = result?.stage_statuses || {};
+  const http = result?.http || [];
   const totalHosts = result?.subdomains?.length || 0;
-  const liveHosts = result?.http?.length || 0;
+  const liveHosts = http.length;
+  const taggedHosts = http.filter(h => (h.tech || []).length).length;
   const dirs = result?.dirs || [];
   const confirmed = dirs.filter(d => d.confidence === 'confirmed').length;
   const possible = dirs.filter(d => d.confidence === 'possible').length;
@@ -191,6 +193,7 @@ function ProgressPanel({scan, result}) {
     ['subdomains', 'Subdomains', `${totalHosts}/${totalHosts || '—'}`],
     ['naabu', 'Naabu', `${result?.ports?.length || 0} ports`],
     ['httpx', 'Httpx', `${liveHosts}/${totalHosts || '—'}`],
+    ['wappalyzer', 'Wappalyzer', `${taggedHosts} tagged`],
     ['ffuf', 'FFUF', `${stageInfo.ffuf?.successful_hosts || 0}/${stageInfo.ffuf?.total || liveHosts || '—'} hosts · ${confirmed} confirmed · ${possible} possible · ${filtered} filtered · ${stageInfo.ffuf?.failed_hosts || 0} failed`],
     ['screenshots', 'Gowitness', `${screenshotCount} shots`],
   ];
@@ -202,6 +205,7 @@ function ProgressPanel({scan, result}) {
         <em>{totalHosts} subdomains</em>
         <em>{result?.ports?.length || 0} ports</em>
         <em>{liveHosts} live</em>
+        <em>{taggedHosts} tagged</em>
         <em>{confirmed} paths</em>
         <em>{screenshotCount} shots</em>
         <strong>{scan?.progress || 100}%</strong>
@@ -448,7 +452,7 @@ function App() {
   const [targetDrawerOpen, setTargetDrawerOpen] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const targetLoadSequence = useRef(0);
-  const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_mode: 'tech', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_naabu: true, naabu_ports: '80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443', run_ffuf: true, run_screenshots: true, use_subdomains_top1million_110000: false, use_bug_bounty_subdomains_trickest: false});
+  const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_mode: 'tech', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_naabu: true, naabu_ports: '80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443', wappalyzer_scan_type: 'balanced', wappalyzer_workers: 5, run_ffuf: true, run_screenshots: true, use_subdomains_top1million_110000: false, use_bug_bounty_subdomains_trickest: false});
 
   const refresh = async () => {
     const [targetRows, wordlistRows, appSettings, healthInfo] = await Promise.all([j(`${API}/targets`), j(`${API}/wordlists`), j(`${API}/settings`), j(`${API}/health`)]);
@@ -521,7 +525,7 @@ function App() {
   const settingsDrawer = <Drawer title="Scan settings" open={settingsDrawerOpen} onClose={() => setSettingsDrawerOpen(false)} wide>
     <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><div className="option-stack"><span className="setting-label">DNS brute force</span><label><input type="checkbox" checked={opts.use_subdomains_top1million_110000} onChange={e => setOpts({...opts, use_subdomains_top1million_110000: e.target.checked})}/> Use subdomains-top1million-110000.txt</label><label><input type="checkbox" checked={opts.use_bug_bounty_subdomains_trickest} onChange={e => setOpts({...opts, use_bug_bounty_subdomains_trickest: e.target.checked})}/> Use bug-bounty-program-subdomains-trickest-inventory.txt</label><p className="hint">Large DNS brute-force lists are off by default and run only when checked.</p></div><select value={opts.dirb_wordlist_id || ''} onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Default - {defaultLabel}</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>{ffufWordlistHint && <p className="hint">{ffufWordlistHint}</p>}{!defaultAvailable && opts.run_ffuf && !opts.dirb_wordlist_id && health && <p className="inline-alert">Default FFUF wordlist unavailable. Upload/select a dirb wordlist.</p>}</SidebarGroup>
     <SidebarGroup title="Request Settings">{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
-    <SidebarGroup title="Port & Fingerprint"><label><input type="checkbox" checked={opts.run_naabu} onChange={e => setOpts({...opts, run_naabu: e.target.checked})}/> Run Naabu web-port discovery</label><input placeholder="naabu ports" value={opts.naabu_ports} onChange={e => setOpts({...opts, naabu_ports: e.target.value})}/><p className="hint">Naabu finds web apps on non-standard ports before httpx fingerprints them.</p></SidebarGroup>
+    <SidebarGroup title="Port & Fingerprint"><label><input type="checkbox" checked={opts.run_naabu} onChange={e => setOpts({...opts, run_naabu: e.target.checked})}/> Run Naabu web-port discovery</label><input placeholder="naabu ports" value={opts.naabu_ports} onChange={e => setOpts({...opts, naabu_ports: e.target.value})}/><div className="option-stack always-on"><span className="setting-label">Wappalyzer fingerprinting</span><Badge tone="ok">Always on after httpx</Badge><select value={opts.wappalyzer_scan_type} onChange={e => setOpts({...opts, wappalyzer_scan_type: e.target.value})}><option value="balanced">Balanced</option><option value="fast">Fast</option><option value="full">Full browser mode</option></select><input placeholder="wappalyzer workers" value={opts.wappalyzer_workers} onChange={e => setOpts({...opts, wappalyzer_workers: Number(e.target.value) || 1})}/><p className="hint">Mandatory stage: Wappalyzer runs after httpx on all live hosts before tech-specific FFUF.</p></div></SidebarGroup>
     <SidebarGroup title="FFUF Options"><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label><select value={opts.ffuf_mode} onChange={e => setOpts({...opts, ffuf_mode: e.target.value})}><option value="tech">Tech-specific only</option><option value="combined">Tech-specific + generic</option><option value="generic">Generic only</option></select>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><input placeholder="host timeout seconds" value={opts.ffuf_host_timeout} onChange={e => setOpts({...opts, ffuf_host_timeout: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_auto_calibration} onChange={e => setOpts({...opts, ffuf_auto_calibration: e.target.checked})}/> Auto calibration (-ac)</label><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label><p className="hint">Tech-specific mode uses small focused wordlists based on fingerprints and response headers.</p></SidebarGroup>
   </Drawer>;
 

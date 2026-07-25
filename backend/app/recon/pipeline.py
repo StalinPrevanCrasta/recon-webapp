@@ -20,7 +20,7 @@ from app.recon.runner import CommandRunner, run_command as _run_command
 from app.recon.wrappers import (
     build_ffuf_command, build_gowitness_command, build_httpx_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
-    parse_naabu_jsonl,
+    parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json,
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
@@ -542,6 +542,15 @@ def fingerprint_host(item: dict, response_headers: dict, ports: list[int]) -> li
     return sorted(tags)
 
 
+def merge_fingerprints(tech: list[str], existing: list[str] | None = None) -> list[str]:
+    item = {"url": "", "title": "", "server": "", "tech": tech}
+    merged = set(existing or [])
+    merged.update(fingerprint_host(item, {}, []))
+    if len(merged) > 1 and "unknown" in merged:
+        merged.remove("unknown")
+    return sorted(merged)
+
+
 def run_httpx(db: Session, scan: models.Scan) -> list[str]:
     settings = load_settings()
     command = _command_for_scan(scan.id)
@@ -596,6 +605,49 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
         db.add(obj)
     db.commit()
     return urls
+
+
+def run_wappalyzer(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
+    config = scan.config or {}
+    scan_type = str(config.get("wappalyzer_scan_type") or "balanced")
+    if scan_type not in {"fast", "balanced", "full"}:
+        scan_type = "balanced"
+    workers = int(config.get("wappalyzer_workers", 5))
+    query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
+    if urls:
+        query = query.filter(models.HttpxResult.url.in_(urls))
+    rows = query.all()
+    stats = {"total_hosts": len(rows), "updated_hosts": 0, "failed": False}
+    infile = raw_path(scan.id, "wappalyzer", "input")
+    outfile = raw_path(scan.id, "wappalyzer", "wappalyzer", "json")
+    infile.write_text("\n".join(row.url for row in rows), encoding="utf-8")
+    if not rows:
+        outfile.write_text("{}", encoding="utf-8")
+        record_raw(db, scan.id, "wappalyzer", "wappalyzer", outfile)
+        return stats
+    command = _command_for_scan(scan.id)
+    try:
+        _call_command(command, build_wappalyzer_command(infile, outfile, scan_type, workers), timeout=int(config.get("wappalyzer_timeout", 1800)))
+    except Exception as exc:
+        err = raw_path(scan.id, "wappalyzer", "wappalyzer-error")
+        err.write_text(str(exc), encoding="utf-8")
+        record_raw(db, scan.id, "wappalyzer", "wappalyzer-error", err)
+        stats["failed"] = True
+        return stats
+    if not outfile.exists():
+        outfile.write_text("{}", encoding="utf-8")
+    record_raw(db, scan.id, "wappalyzer", "wappalyzer", outfile)
+    detected = parse_wappalyzer_json(outfile.read_text(errors="ignore"))
+    for row in rows:
+        names = detected.get(row.url) or detected.get(row.url.rstrip("/")) or []
+        if not names:
+            continue
+        tech = sorted(set(row.tech or []) | set(names))
+        row.tech = tech
+        row.fingerprints = merge_fingerprints(tech, row.fingerprints or [])
+        stats["updated_hosts"] += 1
+    db.commit()
+    return stats
 
 
 def _ffuf_host(context: FfufHostContext, command: Callable) -> FfufHostResult:
@@ -771,6 +823,10 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             urls = run_httpx(db, scan)
         elif scan.config:
             urls = scan.config.get("subset_urls")
+
+        if stage_only in (None, "wappalyzer", "ffuf"):
+            set_scan(db, scan, "wappalyzer", 58)
+            run_wappalyzer(db, scan, urls)
 
         if (scan.config or {}).get("run_ffuf", True) and stage_only in (None, "ffuf"):
             set_scan(db, scan, "ffuf", 68)
