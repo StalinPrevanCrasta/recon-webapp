@@ -407,7 +407,9 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     depth_max = int(config.get("recursion_depth", 2))
     subfinder_timeout = int(config.get("subfinder_timeout", 300))
     command = _command_for_scan(scan.id)
-    seen: set[str] = set()
+    seen: set[str] = {domain}
+    batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(domain, "root", 0)])
+    db.commit()
 
     subfinder_out = raw_path(scan.id, "subdomains", "subfinder")
     crtsh_out = raw_path(scan.id, "subdomains", "crtsh")

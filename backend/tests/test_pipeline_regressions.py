@@ -151,6 +151,54 @@ def test_enumerate_subdomains_commits_subfinder_results_before_amass(monkeypatch
         db.close()
 
 
+def test_enumerate_subdomains_includes_root_domain(monkeypatch, tmp_path):
+    db, target, scan = make_scan()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "crtsh", lambda domain: set())
+
+    def fake_run_command(cmd, timeout=None):
+        if cmd[0] == "subfinder":
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_text("api.example.com\n", encoding="utf-8")
+            return "", ""
+        if cmd[0] == "amass":
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_text("", encoding="utf-8")
+            return "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        names = pipeline.enumerate_subdomains(db, scan)
+        assert target.domain in names
+        row = db.query(models.Subdomain).filter_by(target_id=target.id, name=target.domain).one()
+        assert row.sources == ["root"]
+    finally:
+        db.close()
+
+
+def test_httpx_checks_root_domain_when_no_subdomains_discovered(monkeypatch, tmp_path):
+    db, target, scan = make_scan()
+    db.add(models.Subdomain(target_id=target.id, scan_id=scan.id, first_seen_scan_id=scan.id, name=target.domain, sources=["root"], depths=[0]))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+
+    def fake_run_command(cmd, timeout=None):
+        infile = Path(cmd[cmd.index("-l") + 1])
+        assert target.domain in infile.read_text(encoding="utf-8").splitlines()
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f'{{"url":"https://{target.domain}","status_code":200}}\n', encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        urls = pipeline.run_httpx(db, scan)
+        assert urls == [f"https://{target.domain}"]
+    finally:
+        db.close()
+
+
 def test_enumerate_subdomains_uses_bundled_bruteforce_wordlist_only_when_enabled(monkeypatch, tmp_path):
     bundled_wordlist = tmp_path / "subdomains-top1million-110000.txt"
     bundled_wordlist.write_text("deep\n", encoding="utf-8")
