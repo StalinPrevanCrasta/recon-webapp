@@ -14,6 +14,9 @@ class RunScanRequest(BaseModel):
     subfinder_timeout: int = Field(default=300, ge=30, le=1800)
     use_subdomains_top1million_110000: bool = False
     use_bug_bounty_subdomains_trickest: bool = False
+    run_naabu: bool = True
+    naabu_ports: str = "80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443"
+    naabu_timeout: int = Field(default=1800, ge=30, le=7200)
     amass_timeout: int = Field(default=120, ge=30, le=1800)
     extensions: str = ""
     ffuf_recursive: bool = False
@@ -21,6 +24,7 @@ class RunScanRequest(BaseModel):
     ffuf_filter_size: str | None = None
     ffuf_filter_words: str | None = None
     ffuf_filter_lines: str | None = None
+    ffuf_mode: str = "tech"
     ffuf_auto_calibration: bool = True
     ffuf_baseline_count: int = Field(default=3, ge=0, le=10)
     ffuf_host_timeout: int = Field(default=300, ge=30, le=3600)
@@ -37,12 +41,16 @@ class StageRerunRequest(BaseModel):
     amass_timeout: int = 120
     use_subdomains_top1million_110000: bool = False
     use_bug_bounty_subdomains_trickest: bool = False
+    run_naabu: bool = True
+    naabu_ports: str = "80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443"
+    naabu_timeout: int = 1800
     extensions: str = ""
     ffuf_recursive: bool = False
     ffuf_match_codes: str = "all"
     ffuf_filter_size: str | None = None
     ffuf_filter_words: str | None = None
     ffuf_filter_lines: str | None = None
+    ffuf_mode: str = "tech"
     ffuf_auto_calibration: bool = True
     ffuf_baseline_count: int = 3
     ffuf_host_timeout: int = 300

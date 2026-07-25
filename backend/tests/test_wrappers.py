@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, build_subfinder_command, parse_httpx_jsonl, parse_ffuf_json
+from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, build_naabu_command, build_subfinder_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -33,6 +33,22 @@ def test_subfinder_command_uses_recursive_sources(tmp_path):
     assert ["-o", str(out)] == cmd[-2:]
 
 
+def test_naabu_command_and_jsonl_parser(tmp_path):
+    infile = tmp_path / "hosts.txt"
+    outfile = tmp_path / "naabu.jsonl"
+    cmd = build_naabu_command(infile, outfile, "80,8080")
+
+    assert cmd[:3] == ["naabu", "-list", str(infile)]
+    assert "-json" in cmd
+    assert "80,8080" in cmd
+    assert parse_naabu_jsonl('{"host":"a.example","ip":"1.2.3.4","port":8080}\n') == [{
+        "host": "a.example",
+        "ip": "1.2.3.4",
+        "port": 8080,
+        "protocol": "tcp",
+    }]
+
+
 def test_parse_httpx_jsonl_extracts_required_fields():
     rows = parse_httpx_jsonl('{"url":"https://a.example","status_code":200,"title":"Home","tech":["nginx"],"content_length":123,"webserver":"nginx","host":"1.2.3.4","location":"/login"}\n')
     assert rows == [{
@@ -44,6 +60,7 @@ def test_parse_httpx_jsonl_extracts_required_fields():
         "server": "nginx",
         "ip": "1.2.3.4",
         "redirect_chain": "/login",
+        "response_headers": {},
     }]
 
 

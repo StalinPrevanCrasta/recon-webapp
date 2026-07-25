@@ -43,7 +43,38 @@ def parse_httpx_jsonl(text: str) -> list[dict]:
             "server": item.get("webserver") or item.get("server"),
             "ip": item.get("host") or item.get("ip"),
             "redirect_chain": item.get("location") or item.get("redirect-chain") or item.get("final_url"),
+            "response_headers": item.get("header") or item.get("headers") or {},
         })
+    return rows
+
+
+def build_naabu_command(input_file: Path, output_file: Path, ports: str | None = None) -> list[str]:
+    ports = ports or "80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443"
+    return ["naabu", "-list", str(input_file), "-json", "-silent", "-p", ports, "-o", str(output_file)]
+
+
+def parse_naabu_jsonl(text: str) -> list[dict]:
+    rows: list[dict] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+            host = item.get("host") or item.get("ip") or item.get("hostname")
+            port = item.get("port")
+            if host and port:
+                rows.append({
+                    "host": str(host).strip().lower(),
+                    "ip": item.get("ip") if item.get("ip") != host else None,
+                    "port": int(port),
+                    "protocol": item.get("protocol") or "tcp",
+                })
+        except json.JSONDecodeError:
+            if ":" not in line:
+                continue
+            host, port = line.rsplit(":", 1)
+            if port.isdigit():
+                rows.append({"host": host.strip().lower(), "ip": None, "port": int(port), "protocol": "tcp"})
     return rows
 
 

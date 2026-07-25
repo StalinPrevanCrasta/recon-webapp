@@ -216,7 +216,7 @@ header h1 { font-size: clamp(22px, 2.4vw, 32px); line-height: 1.08; }
 .pipeline-summary em { font-style: normal; }
 .pipeline-summary strong { margin-left: auto; color: var(--accent); }
 .panel-title { display: flex; justify-content: space-between; align-items: center; font-weight: 850; margin-bottom: 10px; }
-.stage-list { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.stage-list { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
 .stage { display: grid; grid-template-columns: 40px 1fr; gap: 3px 8px; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: #f8fafc; color: var(--muted); font-size: 12px; }
 .stage>span { grid-row: 1 / 4; color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
 .stage b { color: var(--text-strong); font-size: 14px; }

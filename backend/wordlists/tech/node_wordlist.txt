@@ -1,0 +1,17 @@
+api/
+api/v1/
+api/v2/
+graphql
+graphql/
+graphiql
+swagger
+swagger.json
+openapi.json
+debug
+metrics
+health
+status
+actuator
+package.json
+.env
+server-status

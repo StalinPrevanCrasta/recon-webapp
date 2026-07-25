@@ -85,7 +85,9 @@ def test_run_ffuf_stores_baseline_metadata_and_deduplicates_normalized_paths(mon
         {"status_code": 403, "size": 999, "words": 10, "lines": 3, "body_hash": "wild"},
         {"status_code": 403, "size": 999, "words": 10, "lines": 3, "body_hash": "wild"},
     ])
-    db, target, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None})
+    db, target, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None, "ffuf_mode": "generic"})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://a.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
     seen = {}
 
     def fake_run_command(cmd, timeout=None):

@@ -50,6 +50,9 @@ class HttpxResult(Base):
     status_code: Mapped[int | None] = mapped_column(Integer, index=True)
     title: Mapped[str | None] = mapped_column(Text)
     tech: Mapped[list[str]] = mapped_column(JSON, default=list)
+    fingerprints: Mapped[list[str]] = mapped_column(JSON, default=list)
+    response_headers: Mapped[dict] = mapped_column(JSON, default=dict)
+    ports: Mapped[list[int]] = mapped_column(JSON, default=list)
     response_size: Mapped[int | None] = mapped_column(Integer)
     server: Mapped[str | None] = mapped_column(String(255))
     redirect_chain: Mapped[str | None] = mapped_column(Text)
@@ -58,6 +61,19 @@ class HttpxResult(Base):
     first_seen_scan_id: Mapped[int] = mapped_column(Integer, index=True)
     interesting: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text)
+
+class PortResult(Base):
+    __tablename__ = "port_results"
+    __table_args__ = (UniqueConstraint("scan_id", "host", "port", "protocol", name="uq_scan_host_port_proto"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
+    host: Mapped[str] = mapped_column(String(512), index=True)
+    ip: Mapped[str | None] = mapped_column(String(128), index=True)
+    port: Mapped[int] = mapped_column(Integer, index=True)
+    protocol: Mapped[str] = mapped_column(String(32), default="tcp", index=True)
+    source: Mapped[str] = mapped_column(String(64), default="naabu")
+    first_seen_scan_id: Mapped[int] = mapped_column(Integer, index=True)
 
 class DirbResult(Base):
     __tablename__ = "dirb_results"

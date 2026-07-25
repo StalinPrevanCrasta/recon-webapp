@@ -1,0 +1,15 @@
+actuator
+actuator/health
+actuator/env
+actuator/metrics
+actuator/heapdump
+jolokia
+swagger-ui/
+v3/api-docs
+api-docs
+WEB-INF/
+manager/html
+struts/
+server-status
+health
+metrics

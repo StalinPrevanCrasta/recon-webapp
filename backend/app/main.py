@@ -84,7 +84,7 @@ async def upload_wordlist(kind: str, file: UploadFile = File(...), db: Session =
 
 @app.post("/api/scans/run")
 def run_scan(req: RunScanRequest, db: Session = Depends(get_db)):
-    if req.run_ffuf:
+    if req.run_ffuf and req.ffuf_mode in {"generic", "combined"}:
         try:
             resolve_ffuf_wordlist(db, req.dirb_wordlist_id)
         except ValueError:
@@ -100,7 +100,7 @@ def run_scan(req: RunScanRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/scans/{scan_id}/rerun")
 def rerun_stage(scan_id: int, req: StageRerunRequest, db: Session = Depends(get_db)):
-    if req.stage == "ffuf":
+    if req.stage == "ffuf" and req.ffuf_mode in {"generic", "combined"}:
         try:
             resolve_ffuf_wordlist(db, req.dirb_wordlist_id)
         except ValueError:
@@ -136,6 +136,7 @@ def delete_target(target_id: int, db: Session = Depends(get_db)):
         "targets": 1,
         "scans": len(scan_ids),
         "subdomains": db.query(models.Subdomain).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "ports": db.query(models.PortResult).filter_by(target_id=target_id).delete(synchronize_session=False),
         "http": db.query(models.HttpxResult).filter_by(target_id=target_id).delete(synchronize_session=False),
         "dirs": db.query(models.DirbResult).filter_by(target_id=target_id).delete(synchronize_session=False),
         "screenshots": db.query(models.Screenshot).filter_by(target_id=target_id).delete(synchronize_session=False),
@@ -166,6 +167,7 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
     ffuf_success = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf"]
     return {
         "subdomains": {"status": stage_state("subdomains", len(subdomains)), "results": len(subdomains)},
+        "naabu": {"status": stage_state("naabu", 0), "results": len([r for r in raw_by_stage.get("naabu", []) if r.tool == "naabu"])},
         "httpx": {"status": stage_state("httpx", len(http)), "results": len(http), "total": len(subdomains)},
         "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status == "running" else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": len(ffuf_success), "failed_hosts": len(ffuf_errors), "total": len(http)},
         "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots)},
@@ -184,7 +186,8 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     def rowdict(row, keys):
         d = {k: getattr(row, k) for k in keys}; d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id and bool(prev); return d
     subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()]
-    http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "response_size", "server", "redirect_chain", "ip", "headers_sent", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()]
+    ports = [rowdict(r, ["id", "host", "ip", "port", "protocol", "source"]) for r in db.query(models.PortResult).filter_by(scan_id=scan.id).all()]
+    http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "fingerprints", "ports", "response_size", "server", "redirect_chain", "ip", "headers_sent", "response_headers", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()]
     dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()]
     screenshots = [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()]
     raw_rows = db.query(models.RawOutput).filter_by(scan_id=scan.id).all()
@@ -195,6 +198,7 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         "active_scan": {"id": scan.id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error},
         "stage_statuses": stage_statuses(db, scan, subdomains, http, dirs, screenshots, raw_rows),
         "subdomains": subdomains,
+        "ports": ports,
         "http": http,
         "dirs": dirs,
         "screenshots": screenshots,

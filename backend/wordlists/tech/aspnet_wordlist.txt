@@ -1,0 +1,12 @@
+swagger
+swagger/index.html
+api/
+elmah.axd
+trace.axd
+web.config
+health
+status
+admin/
+login
+signin
+server-status

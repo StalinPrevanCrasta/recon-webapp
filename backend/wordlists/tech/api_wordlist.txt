@@ -1,0 +1,15 @@
+api/
+api/v1/
+api/v2/
+graphql
+swagger
+swagger.json
+openapi.json
+v1/
+v2/
+health
+status
+metrics
+login
+auth
+admin

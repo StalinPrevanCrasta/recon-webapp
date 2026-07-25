@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Sequence
+from urllib.parse import urlparse
 
 import httpx as pyhttpx
 from sqlalchemy.orm import Session
@@ -17,8 +18,9 @@ from sqlalchemy.orm import Session
 from app import models
 from app.recon.runner import CommandRunner, run_command as _run_command
 from app.recon.wrappers import (
-    build_ffuf_command, build_gowitness_command, build_httpx_command,
+    build_ffuf_command, build_gowitness_command, build_httpx_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
+    parse_naabu_jsonl,
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
@@ -37,6 +39,19 @@ RAW_DIR = DATA_DIR / "raw"
 SCREEN_DIR = DATA_DIR / "screenshots"
 WORDLIST_DIR = DATA_DIR / "wordlists"
 DEFAULT_RESOLVERS = DATA_DIR / "resolvers.txt"
+WEB_PORTS = {80, 81, 3000, 3001, 5000, 5173, 7001, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443, 10443}
+BUNDLED_TECH_WORDLISTS = {
+    "php": Path("/app/wordlists/tech/php_wordlist.txt"),
+    "wordpress": Path("/app/wordlists/tech/php_wordlist.txt"),
+    "node": Path("/app/wordlists/tech/node_wordlist.txt"),
+    "javascript": Path("/app/wordlists/tech/node_wordlist.txt"),
+    "graphql": Path("/app/wordlists/tech/node_wordlist.txt"),
+    "java": Path("/app/wordlists/tech/java_wordlist.txt"),
+    "spring": Path("/app/wordlists/tech/java_wordlist.txt"),
+    "tomcat": Path("/app/wordlists/tech/java_wordlist.txt"),
+    "aspnet": Path("/app/wordlists/tech/aspnet_wordlist.txt"),
+    "api": Path("/app/wordlists/tech/api_wordlist.txt"),
+}
 BUNDLED_SUBDOMAIN_WORDLISTS = (
     ("use_subdomains_top1million_110000", "puredns-top1m-110k", WORDLIST_DIR / "subdomain" / "subdomains-top1million-110000.txt"),
     ("use_bug_bounty_subdomains_trickest", "puredns-trickest", WORDLIST_DIR / "subdomain" / "bug-bounty-program-subdomains-trickest-inventory.txt"),
@@ -196,6 +211,7 @@ class FfufHostContext:
     headers: dict[str, str]
     proxy: str | None
     wordlist_path: Path
+    fingerprints: list[str]
 
 
 @dataclass(frozen=True)
@@ -205,6 +221,47 @@ class FfufHostResult:
     baseline_out: Path | None = None
     items: list[dict] | None = None
     error: dict | None = None
+
+
+def _read_wordlist_lines(path: Path) -> list[str]:
+    try:
+        return [
+            line.strip()
+            for line in path.read_text(errors="ignore").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    except (FileNotFoundError, OSError):
+        return []
+
+
+def build_ffuf_wordlist_for_host(scan_id: int, url: str, fingerprints: list[str], generic_wordlist: Path | None, mode: str) -> Path:
+    if mode == "generic" and generic_wordlist:
+        return generic_wordlist
+    paths: list[Path] = []
+    for fingerprint in fingerprints or ["unknown"]:
+        path = BUNDLED_TECH_WORDLISTS.get(fingerprint.lower())
+        if path and path not in paths:
+            paths.append(path)
+    if not paths:
+        paths.append(Path("/app/wordlists/tech/api_wordlist.txt"))
+    lines: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        for line in _read_wordlist_lines(path):
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+    if mode == "combined" and generic_wordlist:
+        for line in _read_wordlist_lines(generic_wordlist):
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+    if not lines and generic_wordlist:
+        return generic_wordlist
+    safe_url = re.sub(r"[^a-zA-Z0-9_.-]", "_", url)
+    out = raw_path(scan_id, "ffuf-wordlists", safe_url)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out
 
 
 def _normalize_discoveries(discoveries: Sequence[SubdomainDiscovery]) -> dict[str, tuple[set[str], set[int]]]:
@@ -396,15 +453,109 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     return sorted(seen)
 
 
+def run_naabu(db: Session, scan: models.Scan) -> list[dict]:
+    command = _command_for_scan(scan.id)
+    hosts = [r.name for r in db.query(models.Subdomain).filter_by(target_id=scan.target_id).all()]
+    infile = raw_path(scan.id, "naabu", "input")
+    outfile = raw_path(scan.id, "naabu", "naabu", "jsonl")
+    infile.write_text("\n".join(sorted(set(hosts))))
+    if not hosts:
+        outfile.write_text("")
+        record_raw(db, scan.id, "naabu", "naabu", outfile)
+        return []
+    try:
+        _call_command(command, build_naabu_command(infile, outfile, str((scan.config or {}).get("naabu_ports", "")) or None), timeout=int((scan.config or {}).get("naabu_timeout", 1800)))
+    except Exception as exc:
+        err = raw_path(scan.id, "naabu", "naabu-error")
+        err.write_text(str(exc), encoding="utf-8")
+        record_raw(db, scan.id, "naabu", "naabu-error", err)
+        return []
+    if not outfile.exists():
+        outfile.write_text("")
+    record_raw(db, scan.id, "naabu", "naabu", outfile)
+    rows = parse_naabu_jsonl(outfile.read_text(errors="ignore"))
+    existing = {(r.host, r.port, r.protocol) for r in db.query(models.PortResult).filter_by(scan_id=scan.id).all()}
+    prior_cache: dict[tuple[str, int, str], int] = {}
+    for item in rows:
+        key = (item["host"], item["port"], item.get("protocol") or "tcp")
+        if key in existing:
+            continue
+        prior_key = key
+        if prior_key not in prior_cache:
+            prior = db.query(models.PortResult).filter_by(target_id=scan.target_id, host=key[0], port=key[1], protocol=key[2]).order_by(models.PortResult.id.asc()).first()
+            prior_cache[prior_key] = prior.first_seen_scan_id if prior else scan.id
+        db.add(models.PortResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_cache[prior_key], source="naabu", **item))
+    db.commit()
+    return rows
+
+
+def _host_from_url(value: str) -> str:
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    return (parsed.hostname or value).lower()
+
+
+def _httpx_inputs_from_ports(subdomains: list[str], ports: list[dict]) -> list[str]:
+    inputs = set(subdomains)
+    for item in ports:
+        port = int(item.get("port") or 0)
+        host = item.get("host")
+        if host and port in WEB_PORTS:
+            inputs.add(f"{host}:{port}")
+    return sorted(inputs)
+
+
+def fetch_response_headers(url: str, settings, timeout: int = 10) -> dict:
+    try:
+        response = pyhttpx.get(url, headers=settings.headers or {}, proxy=settings.proxy, follow_redirects=False, timeout=timeout)
+        return {k.lower(): v for k, v in response.headers.items()}
+    except Exception:
+        return {}
+
+
+def fingerprint_host(item: dict, response_headers: dict, ports: list[int]) -> list[str]:
+    haystack = " ".join([
+        item.get("url") or "",
+        item.get("title") or "",
+        item.get("server") or "",
+        " ".join(item.get("tech") or []),
+        " ".join(f"{k}: {v}" for k, v in (response_headers or {}).items()),
+    ]).lower()
+    tags: set[str] = set()
+    rules = [
+        ("wordpress", r"wordpress|wp-content|wp-json|wp-includes"),
+        ("php", r"\bphp\b|x-powered-by:\s*php|laravel|symfony|codeigniter"),
+        ("node", r"node\.js|express|next\.js|nuxt|x-powered-by:\s*express"),
+        ("graphql", r"graphql|apollo"),
+        ("java", r"\bjava\b|spring|tomcat|jetty|jboss|struts|jsessionid"),
+        ("aspnet", r"asp\.net|iis|x-aspnet|x-powered-by:\s*asp"),
+        ("api", r"\bapi\b|swagger|openapi|rest|json"),
+    ]
+    for tag, pattern in rules:
+        if re.search(pattern, haystack):
+            tags.add(tag)
+    if any(port in ports for port in [8080, 8081, 8443, 9000, 9443]):
+        tags.add("java")
+    if any(port in ports for port in [3000, 3001, 5000, 5173]):
+        tags.add("node")
+    if not tags:
+        tags.add("unknown")
+    return sorted(tags)
+
+
 def run_httpx(db: Session, scan: models.Scan) -> list[str]:
     settings = load_settings()
     command = _command_for_scan(scan.id)
     subs = [r.name for r in db.query(models.Subdomain).filter_by(target_id=scan.target_id).all()]
+    port_rows = [r for r in db.query(models.PortResult).filter_by(scan_id=scan.id).all()]
+    host_ports: dict[str, list[int]] = {}
+    for row in port_rows:
+        host_ports.setdefault(row.host, []).append(row.port)
+    inputs = _httpx_inputs_from_ports(subs, [{"host": r.host, "port": r.port} for r in port_rows])
     infile = raw_path(scan.id, "httpx", "input")
     outfile = raw_path(scan.id, "httpx", "httpx", "jsonl")
     outfile.parent.mkdir(parents=True, exist_ok=True)
-    infile.write_text("\n".join(sorted(set(subs))))
-    if not subs:
+    infile.write_text("\n".join(inputs))
+    if not inputs:
         outfile.write_text("")
         record_raw(db, scan.id, "httpx", "httpx", outfile)
         return []
@@ -428,6 +579,12 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
         if not item.get("url"):
             continue
         url = item["url"]
+        host = _host_from_url(url)
+        response_headers = fetch_response_headers(url, settings)
+        ports = sorted(set(host_ports.get(host, [])))
+        item["response_headers"] = response_headers
+        item["ports"] = ports
+        item["fingerprints"] = fingerprint_host(item, response_headers, ports)
         urls.append(url)
         if url in existing_urls:
             continue
@@ -484,13 +641,24 @@ def _ffuf_host(context: FfufHostContext, command: Callable) -> FfufHostResult:
 def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
     settings = load_settings()
     config = scan.config or {}
-    resolved_wordlist = resolve_ffuf_wordlist(db, config.get("dirb_wordlist_id"))
+    mode = str(config.get("ffuf_mode") or "tech").lower()
+    if mode not in {"tech", "generic", "combined"}:
+        mode = "tech"
+    resolved_wordlist = resolve_ffuf_wordlist(db, config.get("dirb_wordlist_id")) if mode in {"generic", "combined"} else None
     metadata = raw_path(scan.id, "ffuf", "wordlist")
-    metadata.write_text(f"Using {resolved_wordlist.source} FFUF wordlist: {resolved_wordlist.display_name}\nPath: {resolved_wordlist.path}\n", encoding="utf-8")
+    metadata.write_text(
+        f"FFUF mode: {mode}\n"
+        f"Generic wordlist: {resolved_wordlist.display_name if resolved_wordlist else 'not used'}\n"
+        f"Generic path: {resolved_wordlist.path if resolved_wordlist else 'not used'}\n",
+        encoding="utf-8",
+    )
     record_raw(db, scan.id, "ffuf", "ffuf-wordlist", metadata)
-    urls = urls or [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500).all()]
-    stats = {"total_hosts": len(urls), "successful_hosts": 0, "failed_hosts": 0, "errors": []}
-    if not urls:
+    query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
+    if urls:
+        query = query.filter(models.HttpxResult.url.in_(urls))
+    http_rows = query.all()
+    stats = {"total_hosts": len(http_rows), "successful_hosts": 0, "failed_hosts": 0, "errors": [], "mode": mode}
+    if not http_rows:
         return stats
 
     existing_paths = {
@@ -499,8 +667,16 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
     }
     command = _command_for_scan(scan.id)
     contexts = [
-        FfufHostContext(scan.id, url, dict(config), dict(settings.headers), settings.proxy, Path(resolved_wordlist.path))
-        for url in urls
+        FfufHostContext(
+            scan.id,
+            row.url,
+            dict(config),
+            dict(settings.headers),
+            settings.proxy,
+            build_ffuf_wordlist_for_host(scan.id, row.url, row.fingerprints or [], Path(resolved_wordlist.path) if resolved_wordlist else None, mode),
+            row.fingerprints or [],
+        )
+        for row in http_rows
     ]
 
     results: list[FfufHostResult] = []
@@ -586,14 +762,18 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             set_scan(db, scan, "subdomains", 10)
             enumerate_subdomains(db, scan)
 
+        if (scan.config or {}).get("run_naabu", True) and stage_only in (None, "naabu"):
+            set_scan(db, scan, "naabu", 30)
+            run_naabu(db, scan)
+
         if stage_only in (None, "httpx"):
-            set_scan(db, scan, "httpx", 40)
+            set_scan(db, scan, "httpx", 45)
             urls = run_httpx(db, scan)
         elif scan.config:
             urls = scan.config.get("subset_urls")
 
         if (scan.config or {}).get("run_ffuf", True) and stage_only in (None, "ffuf"):
-            set_scan(db, scan, "ffuf", 65)
+            set_scan(db, scan, "ffuf", 68)
             ffuf_stats = run_ffuf(db, scan, urls)
 
         if (scan.config or {}).get("run_screenshots", True) and stage_only in (None, "screenshots"):

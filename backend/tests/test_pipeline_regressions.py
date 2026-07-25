@@ -31,7 +31,7 @@ def test_scan_request_rejects_ffuf_enabled_without_dirb_wordlist(monkeypatch):
     monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", Path("/missing/bundled/common.txt"))
     client = TestClient(app)
 
-    response = client.post("/api/scans/run", json={"domain": f"reject-{uuid4().hex}.example", "run_ffuf": True})
+    response = client.post("/api/scans/run", json={"domain": f"reject-{uuid4().hex}.example", "run_ffuf": True, "ffuf_mode": "generic"})
 
     assert response.status_code == 422
     assert "FFUF is enabled, but no selected or default directory wordlist is available." in response.text
@@ -39,7 +39,7 @@ def test_scan_request_rejects_ffuf_enabled_without_dirb_wordlist(monkeypatch):
 
 def test_pipeline_rejects_ffuf_enabled_without_dirb_wordlist(monkeypatch):
     monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", Path("/missing/bundled/common.txt"))
-    db, _, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None})
+    db, _, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None, "ffuf_mode": "generic"})
     try:
         with pytest.raises(ValueError, match="FFUF is enabled, but no selected or default directory wordlist is available"):
             pipeline.run_ffuf(db, scan, ["https://a.example"])
@@ -49,11 +49,12 @@ def test_pipeline_rejects_ffuf_enabled_without_dirb_wordlist(monkeypatch):
 
 def test_execute_scan_records_failure_when_ffuf_validation_fails(monkeypatch):
     monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", Path("/missing/bundled/common.txt"))
-    db, _, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None, "run_screenshots": False})
+    db, _, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None, "run_screenshots": False, "ffuf_mode": "generic"})
     scan_id = scan.id
     db.close()
 
     monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: ["a.example"])
+    monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: ["https://a.example"])
 
     db = SessionLocal()
@@ -195,6 +196,7 @@ def test_execute_scan_clears_stale_raw_files_for_reused_scan_id(monkeypatch, tmp
     db.close()
 
     monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: [])
+    monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: [])
 
     db = SessionLocal()
@@ -214,8 +216,8 @@ def test_ffuf_host_failure_is_recorded_and_next_host_continues(monkeypatch, tmp_
     db.commit()
     monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
     monkeypatch.setattr(pipeline, "probe_random_paths", lambda *a, **k: [])
-    monkeypatch.setattr(pipeline, "resolve_ffuf_wordlist", lambda db, selected_wordlist_id: type("R", (), {"path": tmp_path / "common.txt", "source": "default", "display_name": "common.txt"})())
     (tmp_path / "common.txt").write_text("admin\n", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "BUNDLED_TECH_WORDLISTS", {"unknown": tmp_path / "common.txt"})
     calls = []
 
     def fake_run_command(cmd, timeout=None):
@@ -245,6 +247,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     db.close()
     events = []
     monkeypatch.setattr(pipeline, "enumerate_subdomains", lambda db, scan: events.append("subdomains") or ["a.example"])
+    monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: events.append("naabu") or [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
     monkeypatch.setattr(pipeline, "run_ffuf", lambda db, scan, urls=None: events.append("ffuf") or {"successful_hosts": 0, "failed_hosts": 1, "errors": [{"url": "https://a.example", "error": "timeout"}]})
     monkeypatch.setattr(pipeline, "run_screenshots", lambda db, scan: events.append("screenshots"))
@@ -253,7 +256,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     try:
         pipeline.execute_scan(db, scan_id)
         row = db.get(models.Scan, scan_id)
-        assert events == ["subdomains", "httpx", "ffuf", "screenshots"]
+        assert events == ["subdomains", "naabu", "httpx", "ffuf", "screenshots"]
         assert row.status == "partial"
         assert row.stage == "partial"
         assert "FFUF had 1 host failure" in row.error

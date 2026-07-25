@@ -1,0 +1,17 @@
+admin
+admin/
+admin.php
+login.php
+wp-admin/
+wp-login.php
+wp-json/
+xmlrpc.php
+index.php
+config.php
+.env
+vendor/
+storage/
+storage/logs/laravel.log
+debugbar/
+phpinfo.php
+server-status

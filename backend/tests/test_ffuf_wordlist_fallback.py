@@ -90,7 +90,7 @@ def test_missing_default_and_bundled_produces_422(monkeypatch, tmp_path):
     monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", tmp_path / "missing-bundled.txt")
     client = TestClient(app)
 
-    response = client.post("/api/scans/run", json={"domain": f"missing-{uuid4().hex}.example", "run_ffuf": True})
+    response = client.post("/api/scans/run", json={"domain": f"missing-{uuid4().hex}.example", "run_ffuf": True, "ffuf_mode": "generic"})
 
     assert response.status_code == 422
     assert "FFUF is enabled, but no selected or default directory wordlist is available." in response.text
@@ -117,7 +117,7 @@ def test_ffuf_receives_resolved_default_wordlist_path(monkeypatch, tmp_path):
     monkeypatch.setenv("DEFAULT_FFUF_WORDLIST", str(default_path))
     monkeypatch.setattr(wordlist_resolver, "BUNDLED_FFUF_WORDLIST", tmp_path / "missing-bundled.txt")
     monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
-    db, target, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None})
+    db, target, scan = make_scan({"run_ffuf": True, "dirb_wordlist_id": None, "ffuf_mode": "generic"})
     db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://a.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
     db.commit()
     seen = {}
@@ -135,7 +135,8 @@ def test_ffuf_receives_resolved_default_wordlist_path(monkeypatch, tmp_path):
         assert "-w" in seen["cmd"]
         assert seen["cmd"][seen["cmd"].index("-w") + 1] == str(default_path)
         raw = db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="ffuf", tool="ffuf-wordlist").one()
-        assert "Using default FFUF wordlist: common.txt" in Path(raw.path).read_text(encoding="utf-8")
+        assert "FFUF mode: generic" in Path(raw.path).read_text(encoding="utf-8")
+        assert "Generic wordlist: common.txt" in Path(raw.path).read_text(encoding="utf-8")
     finally:
         db.close()
 

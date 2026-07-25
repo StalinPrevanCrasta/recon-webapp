@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium xvfb amass massdns dnsutils && \
     rm -rf /var/lib/apt/lists/*
 RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
+    go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest && \
     go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/ffuf/ffuf/v2@latest && \
     go install github.com/sensepost/gowitness@latest && \
