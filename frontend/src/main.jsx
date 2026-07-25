@@ -124,6 +124,16 @@ function SidebarGroup({title, children, defaultOpen = true}) {
   return <div className="sidebar-group"><button className="group-title" onClick={() => setOpen(!open)}>{title}<span>{open ? 'Hide' : 'Show'}</span></button>{open && <div className="group-body">{children}</div>}</div>;
 }
 
+function Drawer({title, open, onClose, children, wide = false}) {
+  if (!open) return null;
+  return <div className="drawer-backdrop" onMouseDown={onClose}>
+    <aside className={`drawer ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={e => e.stopPropagation()}>
+      <div className="drawer-head"><h2>{title}</h2><button className="close" onClick={onClose}>Close</button></div>
+      <div className="drawer-body">{children}</div>
+    </aside>
+  </div>;
+}
+
 function TargetLoadingScreen({target}) {
   if (!target) return null;
   return <div className="target-loading-screen" role="dialog" aria-modal="true" aria-labelledby="target-loading-title" aria-live="polite">
@@ -182,6 +192,20 @@ function ProgressPanel({scan, result}) {
     ['ffuf', 'FFUF', `${stageInfo.ffuf?.successful_hosts || 0}/${stageInfo.ffuf?.total || liveHosts || '—'} hosts · ${confirmed} confirmed · ${possible} possible · ${filtered} filtered · ${stageInfo.ffuf?.failed_hosts || 0} failed`],
     ['screenshots', 'Gowitness', `${screenshotCount} shots`],
   ];
+  if (status === 'complete' || status === 'partial') {
+    return <div className={`progress-panel compact ${status === 'partial' ? 'partial' : ''}`}>
+      <div className="pipeline-summary">
+        <span>Scan pipeline</span>
+        <Badge tone={status === 'partial' ? 'warn' : 'ok'}>{status}</Badge>
+        <em>{totalHosts} subdomains</em>
+        <em>{liveHosts} live</em>
+        <em>{confirmed} paths</em>
+        <em>{screenshotCount} shots</em>
+        <strong>{scan?.progress || 100}%</strong>
+      </div>
+      {scan?.error && <div className="inline-alert">{scan.error}</div>}
+    </div>;
+  }
   return <div className="progress-panel">
     <div className="panel-title"><span>Scan pipeline</span><Badge tone={status === 'failed' ? 'server' : status === 'partial' ? 'warn' : status === 'complete' ? 'ok' : 'redirect'}>{status}</Badge></div>
     <div className="stage-list">{stages.map(([key, label, text]) => {
@@ -201,13 +225,13 @@ function ProgressPanel({scan, result}) {
   </div>;
 }
 
-function Header({domain, setDomain, run, result, targets, loadTarget, runDisabled, runError}) {
+function Header({domain, setDomain, run, result, targets, loadTarget, runDisabled, runError, openTargets, openSettings}) {
   const scan = result?.active_scan;
   const target = result?.target?.domain || 'No target selected';
   const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} content paths`;
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
-    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
+    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" onClick={openTargets}>Targets</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
   </header>;
 }
 
@@ -417,6 +441,8 @@ function App() {
   const [detail, setDetail] = useState(null);
   const [alert, setAlert] = useState('');
   const [loadingTarget, setLoadingTarget] = useState(null);
+  const [targetDrawerOpen, setTargetDrawerOpen] = useState(false);
+  const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const targetLoadSequence = useRef(0);
   const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_ffuf: true, run_screenshots: true});
 
@@ -493,24 +519,30 @@ function App() {
   }
 
   return <><div className="app-shell">
-    <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError}/>{alert && <div className="alert">{alert}</div>}
-    <main className="layout"><aside className="sidebar">
-      <SidebarGroup title="Marked Targets"><p className="muted">Mark rows during review. Target pinning is next.</p></SidebarGroup>
-      <SidebarGroup title="Recent Targets">{targets.map(t => <div className="target-row" key={t.id}><button className="target" onClick={() => loadTarget(t)}>{t.domain}<span>{t.scan_count} scans</span></button><button className="danger small" title={`Delete ${t.domain}`} onClick={() => deleteTarget(t)}>Delete</button></div>)}</SidebarGroup>
-      <SidebarGroup title="Scan History">{(result?.scans || []).map(s => <button className="target scan-history-item" key={s.id} onClick={() => j(`${API}/targets/${active.id}/results?scan_id=${s.id}`).then(setResult)}><b>Scan #{s.id}</b><span>{ago(s.created_at)} · {s.status}</span></button>)}</SidebarGroup>
-      <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select value={opts.dirb_wordlist_id || ''} onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Default — {defaultLabel}</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>{ffufWordlistHint && <p className="hint">{ffufWordlistHint}</p>}{!defaultAvailable && opts.run_ffuf && !opts.dirb_wordlist_id && health && <p className="inline-alert">Default FFUF wordlist unavailable. Upload/select a dirb wordlist.</p>}</SidebarGroup>
-      <SidebarGroup title="Request Settings" defaultOpen={false}>{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
-      <SidebarGroup title="FFUF Options" defaultOpen={false}><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><input placeholder="host timeout seconds" value={opts.ffuf_host_timeout} onChange={e => setOpts({...opts, ffuf_host_timeout: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_auto_calibration} onChange={e => setOpts({...opts, ffuf_auto_calibration: e.target.checked})}/> Auto calibration (-ac)</label><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label></SidebarGroup>
-      <SidebarGroup title="Import / Export" defaultOpen={false}><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></SidebarGroup>
-    </aside>
+    <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError} openTargets={() => setTargetDrawerOpen(true)} openSettings={() => setSettingsDrawerOpen(true)}/>{alert && <div className="alert">{alert}</div>}
+    <main className="layout">
     <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus} result={result}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Content Paths' ? dirRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
-      {tab === 'Subdomains' && <AssetTable rows={subdomainRows} kind="subdomains" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>} 
-      {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>} 
-      {tab === 'Content Paths' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>} 
-      {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>} 
-      {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>} 
-    </section><DetailsPanel row={detail} result={result} close={() => setDetail(null)} markInteresting={markInteresting}/></main>
-  </div><TargetLoadingScreen target={loadingTarget}/></>;
+      {tab === 'Subdomains' && <AssetTable rows={subdomainRows} kind="subdomains" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
+      {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>}
+      {tab === 'Content Paths' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
+      {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>}
+      {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>}
+    </section></main>
+  </div>
+  <Drawer title="Targets & history" open={targetDrawerOpen} onClose={() => setTargetDrawerOpen(false)}>
+    <SidebarGroup title="Recent Targets">{targets.map(t => <div className="target-row" key={t.id}><button className="target" onClick={() => { setTargetDrawerOpen(false); loadTarget(t); }}>{t.domain}<span>{t.scan_count} scans</span></button><button className="danger small" title={`Delete ${t.domain}`} onClick={() => deleteTarget(t)}>Delete</button></div>)}</SidebarGroup>
+    <SidebarGroup title="Scan History">{(result?.scans || []).map(s => <button className="target scan-history-item" key={s.id} onClick={() => { setTargetDrawerOpen(false); j(`${API}/targets/${active.id}/results?scan_id=${s.id}`).then(setResult); }}><b>Scan #{s.id}</b><span>{ago(s.created_at)} · {s.status}</span></button>)}</SidebarGroup>
+    <SidebarGroup title="Marked Targets"><p className="muted">Marked rows remain highlighted in the result tables.</p></SidebarGroup>
+  </Drawer>
+  <Drawer title="Scan settings" open={settingsDrawerOpen} onClose={() => setSettingsDrawerOpen(false)} wide>
+    <SidebarGroup title="Wordlists"><label>Subdomain upload<input type="file" onChange={e => upload('subdomain', e.target.files[0])}/></label><label>Dirb upload<input type="file" onChange={e => upload('dirb', e.target.files[0])}/></label><select onChange={e => setOpts({...opts, subdomain_wordlist_id: e.target.value})}><option value="">Subdomain wordlist</option>{wordlists.filter(w => w.kind === 'subdomain').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select value={opts.dirb_wordlist_id || ''} onChange={e => setOpts({...opts, dirb_wordlist_id: e.target.value})}><option value="">Default - {defaultLabel}</option>{wordlists.filter(w => w.kind === 'dirb').map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>{ffufWordlistHint && <p className="hint">{ffufWordlistHint}</p>}{!defaultAvailable && opts.run_ffuf && !opts.dirb_wordlist_id && health && <p className="inline-alert">Default FFUF wordlist unavailable. Upload/select a dirb wordlist.</p>}</SidebarGroup>
+    <SidebarGroup title="Request Settings">{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
+    <SidebarGroup title="FFUF Options"><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><input placeholder="host timeout seconds" value={opts.ffuf_host_timeout} onChange={e => setOpts({...opts, ffuf_host_timeout: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_auto_calibration} onChange={e => setOpts({...opts, ffuf_auto_calibration: e.target.checked})}/> Auto calibration (-ac)</label><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label></SidebarGroup>
+  </Drawer>
+  <Drawer title="Host details" open={Boolean(detail)} onClose={() => setDetail(null)} wide>
+    <DetailsPanel row={detail} result={result} close={() => setDetail(null)} markInteresting={markInteresting}/>
+  </Drawer>
+  <TargetLoadingScreen target={loadingTarget}/></>;
 }
 
 createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : <App/>);
