@@ -48,6 +48,15 @@ button, input, select, textarea {
   box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
 button, input, select { min-height: 38px; padding: 8px 12px; }
+input[type="checkbox"], input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  box-shadow: none;
+  accent-color: var(--accent);
+}
 textarea { width: 100%; height: 92px; padding: 10px 12px; resize: vertical; }
 input::placeholder, textarea::placeholder { color: #b4c1ce; }
 button { cursor: pointer; background: #ffffff; color: var(--text); border-color: var(--line-strong); transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
@@ -71,7 +80,7 @@ h3 { font-size: 17px; font-weight: 720; margin: 18px 0 10px; }
 .alert, .inline-alert { border: 1px solid var(--amber); border-radius: 12px; background: #fffbeb; color: #92400e; padding: 10px 12px; }
 .alert { margin: 12px 16px; }
 .inline-alert { margin: 8px 0; font-size: 12px; }
-.hint { color: #c7f5dd; font-size: 12px; margin: 8px 0; }
+.hint { color: #65a985; font-size: 12px; margin: 8px 0; }
 
 .landing-page { min-height: 0; display: flex; flex-direction: column; justify-content: start; padding: 0 22px 22px; position: relative; }
 .landing-nav { display: flex; justify-content: space-between; align-items: center; max-width: 1180px; width: 100%; margin: 10px auto 175px; flex-shrink: 0; }
@@ -155,9 +164,19 @@ header h1 { font-size: clamp(22px, 2.4vw, 32px); line-height: 1.08; }
 .drawer.wide { width: min(560px, calc(100vw - 28px)); }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border-bottom: 1px solid var(--line); background: #f8fafc; }
 .drawer-head h2 { margin: 0; font-size: 18px; }
+.drawer-head .close { flex: 0 0 auto; }
 .drawer-body { min-height: 0; overflow: auto; padding: 12px 14px 16px; }
 .drawer .sidebar-group:first-child { padding-top: 0; }
 .drawer .details { position: static; max-height: none; min-height: 0; padding: 0; border: 0; box-shadow: none; background: transparent; }
+.drawer label:has(> input[type="checkbox"]), .drawer label:has(> input[type="radio"]) {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  margin-top: 8px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .sidebar-group { padding: 8px 0 12px; border-bottom: 1px solid var(--line); }
 .sidebar-group:last-child { border-bottom: 0; }
 .group-title { width: 100%; display: flex; justify-content: space-between; align-items: center; border: 0; background: transparent; padding: 6px 2px; color: var(--muted); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
@@ -168,6 +187,17 @@ header h1 { font-size: clamp(22px, 2.4vw, 32px); line-height: 1.08; }
 .target { display: flex; width: 100%; justify-content: space-between; text-align: left; align-items: center; min-width: 0; }
 .target span { color: var(--muted); font-size: 12px; }
 .scan-history-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.option-stack { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #f8fafc; }
+.option-stack label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  margin: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.setting-label { color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .07em; text-transform: uppercase; }
 
 .cards { display: grid; grid-template-columns: repeat(6, minmax(112px, 1fr)); gap: 10px; margin-bottom: 10px; }
 .card { display: grid; align-content: space-between; min-height: 92px; border-radius: var(--radius); padding: 12px; }
@@ -207,6 +237,7 @@ header h1 { font-size: clamp(22px, 2.4vw, 32px); line-height: 1.08; }
 .filters { display: grid; grid-template-columns: minmax(260px, 2fr) repeat(3, minmax(110px, 1fr)); gap: 7px; align-items: center; margin: 8px 0; }
 .filters input { width: 100%; }
 .filter-chips, .bulkbar { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; margin: 6px 0 9px; color: var(--muted); font-size: 12px; }
+.bulkbar label, .logs-toolbar label { display: inline-flex; align-items: center; gap: 7px; margin: 0; }
 .chip { min-height: 30px; border-radius: 999px; padding: 5px 10px; color: var(--muted); }
 .chip.active { border-color: var(--accent); background: #eef6ff; color: var(--accent); }
 

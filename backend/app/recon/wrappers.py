@@ -141,7 +141,7 @@ def build_gowitness_command(input_file: Path, output_dir: Path, user_agent: str 
 
 
 def build_subfinder_command(domain: str, output_file: Path) -> list[str]:
-    return ["subfinder", "-d", domain, "-silent", "-all", "-o", str(output_file)]
+    return ["subfinder", "-d", domain, "-silent", "-all", "-recursive", "-o", str(output_file)]
 
 
 def build_amass_command(domain: str, output_file: Path) -> list[str]:

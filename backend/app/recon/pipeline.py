@@ -37,6 +37,10 @@ RAW_DIR = DATA_DIR / "raw"
 SCREEN_DIR = DATA_DIR / "screenshots"
 WORDLIST_DIR = DATA_DIR / "wordlists"
 DEFAULT_RESOLVERS = DATA_DIR / "resolvers.txt"
+BUNDLED_SUBDOMAIN_WORDLISTS = (
+    ("use_subdomains_top1million_110000", "puredns-top1m-110k", WORDLIST_DIR / "subdomain" / "subdomains-top1million-110000.txt"),
+    ("use_bug_bounty_subdomains_trickest", "puredns-trickest", WORDLIST_DIR / "subdomain" / "bug-bounty-program-subdomains-trickest-inventory.txt"),
+)
 
 
 def clean_domain(domain: str) -> str:
@@ -168,6 +172,12 @@ class SubdomainDiscovery:
     name: str
     source: str
     depth: int
+
+
+@dataclass(frozen=True)
+class SubdomainBruteforceWordlist:
+    path: Path
+    source: str
 
 
 @dataclass(frozen=True)
@@ -321,11 +331,22 @@ def _persist_enum_result(db: Session, scan: models.Scan, source: str, result: En
     return names
 
 
+def _subdomain_bruteforce_wordlists(db: Session, config: dict) -> list[SubdomainBruteforceWordlist]:
+    wordlists: list[SubdomainBruteforceWordlist] = []
+    selected = db.get(models.Wordlist, config.get("subdomain_wordlist_id")) if config.get("subdomain_wordlist_id") else None
+    if selected:
+        wordlists.append(SubdomainBruteforceWordlist(Path(selected.path), "puredns"))
+    for flag, source, path in BUNDLED_SUBDOMAIN_WORDLISTS:
+        if config.get(flag, False):
+            wordlists.append(SubdomainBruteforceWordlist(path, source))
+    return wordlists
+
+
 def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     config = scan.config or {}
     target = scan.target
     domain = target.domain
-    wordlist = db.get(models.Wordlist, config.get("subdomain_wordlist_id")) if config.get("subdomain_wordlist_id") else None
+    brute_wordlists = _subdomain_bruteforce_wordlists(db, config)
     depth_max = int(config.get("recursion_depth", 2))
     subfinder_timeout = int(config.get("subfinder_timeout", 300))
     command = _command_for_scan(scan.id)
@@ -343,23 +364,27 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
             _persist_enum_result(db, scan, result.tool, result, seen)
 
     frontier: set[str] = set(seen) or {domain}
-    if wordlist:
+    if brute_wordlists:
         if not DEFAULT_RESOLVERS.exists():
             DEFAULT_RESOLVERS.write_text("1.1.1.1\n8.8.8.8\n9.9.9.9\n")
         for depth in range(1, depth_max + 1):
             next_frontier: set[str] = set()
             for base in sorted(frontier):
-                out = raw_path(scan.id, f"subdomains-depth-{depth}", re.sub(r"[^a-zA-Z0-9_.-]", "_", base))
-                try:
-                    _call_command(command, build_puredns_command(base, Path(wordlist.path), DEFAULT_RESOLVERS, out), timeout=1800)
-                    names = _parse_new_names(out, seen)
-                    record_raw(db, scan.id, f"subdomains-depth-{depth}", "puredns", out)
-                    if names:
-                        batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(name, "puredns", depth) for name in names])
-                        next_frontier.update(names)
-                except Exception as e:
-                    out.write_text(str(e))
-                    record_raw(db, scan.id, f"subdomains-depth-{depth}", "puredns-error", out)
+                safe_base = re.sub(r"[^a-zA-Z0-9_.-]", "_", base)
+                for brute_wordlist in brute_wordlists:
+                    out = raw_path(scan.id, f"subdomains-depth-{depth}", f"{brute_wordlist.source}-{safe_base}")
+                    try:
+                        if not brute_wordlist.path.exists():
+                            raise FileNotFoundError(f"Subdomain wordlist not found: {brute_wordlist.path}")
+                        _call_command(command, build_puredns_command(base, brute_wordlist.path, DEFAULT_RESOLVERS, out), timeout=1800)
+                        names = _parse_new_names(out, seen)
+                        record_raw(db, scan.id, f"subdomains-depth-{depth}", brute_wordlist.source, out)
+                        if names:
+                            batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(name, brute_wordlist.source, depth) for name in names])
+                            next_frontier.update(names)
+                    except Exception as e:
+                        out.write_text(str(e))
+                        record_raw(db, scan.id, f"subdomains-depth-{depth}", f"{brute_wordlist.source}-error", out)
             mutations = [SubdomainDiscovery(name, "mutation", depth) for name in mutate_names(next_frontier or frontier, domain) if name not in seen]
             for item in mutations:
                 seen.add(item.name)

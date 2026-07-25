@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, parse_httpx_jsonl, parse_ffuf_json
+from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, build_subfinder_command, parse_httpx_jsonl, parse_ffuf_json
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -22,6 +22,15 @@ def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
     assert "X-Forwarded-For: 127.0.0.1" in joined
     assert "Cookie: a=b" in joined
     assert "http://host.docker.internal:8080" in joined
+
+
+def test_subfinder_command_uses_recursive_sources(tmp_path):
+    out = tmp_path / "subfinder.txt"
+    cmd = build_subfinder_command("example.com", out)
+
+    assert "-recursive" in cmd
+    assert "-all" in cmd
+    assert ["-o", str(out)] == cmd[-2:]
 
 
 def test_parse_httpx_jsonl_extracts_required_fields():

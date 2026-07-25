@@ -18,5 +18,9 @@ assert.doesNotMatch(src, /dangerouslySetInnerHTML/, 'logs are not rendered with 
 assert.match(src, /function TargetLoadingScreen\(/, 'target loading screen exists');
 assert.match(src, /setLoadingTarget\(t\)[\s\S]*targets\/\$\{t\.id\}\/results/, 'target results load only after the loading state is shown');
 assert.match(src, /Other targets remain unloaded/, 'loading screen explains lazy target loading');
+assert.match(src, /use_subdomains_top1million_110000: false/, 'top 110k DNS brute-force list is disabled by default');
+assert.match(src, /use_bug_bounty_subdomains_trickest: false/, 'Trickest DNS brute-force list is disabled by default');
+assert.match(src, /Use subdomains-top1million-110000\.txt/, 'scan settings include top 110k DNS brute-force checkbox');
+assert.match(src, /Use bug-bounty-program-subdomains-trickest-inventory\.txt/, 'scan settings include Trickest DNS brute-force checkbox');
 
 console.log('frontend log viewer static tests passed');

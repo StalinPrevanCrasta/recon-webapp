@@ -149,6 +149,42 @@ def test_enumerate_subdomains_commits_subfinder_results_before_amass(monkeypatch
         db.close()
 
 
+def test_enumerate_subdomains_uses_bundled_bruteforce_wordlist_only_when_enabled(monkeypatch, tmp_path):
+    bundled_wordlist = tmp_path / "subdomains-top1million-110000.txt"
+    bundled_wordlist.write_text("deep\n", encoding="utf-8")
+    db, target, scan = make_scan({"use_subdomains_top1million_110000": True, "recursion_depth": 1})
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "DEFAULT_RESOLVERS", tmp_path / "resolvers.txt")
+    monkeypatch.setattr(pipeline, "BUNDLED_SUBDOMAIN_WORDLISTS", (
+        ("use_subdomains_top1million_110000", "puredns-top1m-110k", bundled_wordlist),
+    ))
+    monkeypatch.setattr(pipeline, "crtsh", lambda domain: set())
+    commands = []
+
+    def fake_run_command(cmd, timeout=None):
+        commands.append(cmd)
+        if cmd[0] == "subfinder":
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_text("", encoding="utf-8")
+            return "", ""
+        if cmd[0] == "puredns":
+            out = Path(cmd[cmd.index("-w") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(f"deep.{cmd[3]}\n", encoding="utf-8")
+            return "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        names = pipeline.enumerate_subdomains(db, scan)
+        assert f"deep.{target.domain}" in names
+        assert any(cmd[0] == "puredns" and cmd[2] == str(bundled_wordlist) for cmd in commands)
+        row = db.query(models.Subdomain).filter_by(target_id=target.id, name=f"deep.{target.domain}").one()
+        assert row.sources == ["puredns-top1m-110k"]
+    finally:
+        db.close()
+
+
 def test_execute_scan_clears_stale_raw_files_for_reused_scan_id(monkeypatch, tmp_path):
     db, _, scan = make_scan({"run_ffuf": False, "run_screenshots": False})
     scan_id = scan.id
