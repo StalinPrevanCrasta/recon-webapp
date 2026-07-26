@@ -26,14 +26,23 @@ assert.match(src, /use_cached_subdomains: true/, 'subdomain cache is enabled by 
 assert.match(src, /refresh_passive_subdomains: true/, 'passive refresh remains enabled by default');
 assert.match(src, /fresh_subdomain_scan: false/, 'fresh-only scans are disabled by default');
 assert.match(src, /subfinder_recursive: false/, 'Subfinder recursive mode is disabled by default');
+assert.match(src, /use_crtsh: false/, 'crt.sh passive source is disabled by default');
 assert.match(src, /Use saved subdomains for this target/, 'scan settings include saved subdomain cache checkbox');
 assert.match(src, /Refresh passive sources now/, 'scan settings include passive refresh checkbox');
 assert.match(src, /Fresh scan only, ignore saved subdomains/, 'scan settings include fresh-only checkbox');
 assert.match(src, /Clear subdomain cache for this target/, 'scan settings include clear subdomain cache action');
 assert.match(src, /Use Subfinder recursive mode/, 'scan settings include optional Subfinder recursive toggle');
-assert.match(src, /Run Arjun on selected URLs/, 'Parameters tab includes manual selected-URL Arjun action');
-assert.match(src, /arjun_only: true/, 'manual Arjun action uses Arjun-only parameter rerun');
+assert.match(src, /Use crt\.sh certificate transparency/, 'scan settings include optional crt.sh toggle');
+assert.match(src, /'Arjun'/, 'Arjun has its own top-level page tab');
+assert.match(src, /\/scans\/\$\{parentScanId\}\/arjun/, 'manual Arjun action calls the dedicated Arjun endpoint');
+assert.match(src, /Arjun Options/, 'scan settings include separate Arjun options');
+assert.match(src, /Arjun Results/, 'Arjun page includes a dedicated results section');
+assert.match(src, /Run Arjun on selected URLs/, 'Arjun page includes manual selected-URL Arjun action');
+assert.doesNotMatch(src, /Run Arjun after parameter discovery/, 'Arjun is not offered as an automatic scan-pipeline option');
 assert.match(src, /source_url \|\| r\.base_url/, 'manual Arjun action uses parameter source URLs');
 assert.match(src, /r\.url \|\| r\.source_url \|\| r\.name/, 'copy selected includes parameter source URLs');
+assert.match(src, /Stop scan/, 'header includes stop scan action while a scan is active');
+assert.match(src, /\/scans\/\$\{scanId\}\/stop/, 'stop scan action calls the stop endpoint');
+assert.match(src, /\['queued', 'running', 'stopping'\]/, 'polling and disabled states include stopping scans');
 
 console.log('frontend log viewer static tests passed');

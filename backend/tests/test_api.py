@@ -99,3 +99,70 @@ def test_raw_output_endpoint_returns_log_contents(tmp_path):
     body = response.json()
     assert body["tool"] == "ffuf-error"
     assert body["content"] == '{"error":"timeout","command":["ffuf"]}'
+
+
+def test_stop_scan_marks_running_scan_as_stopping(monkeypatch):
+    init_db()
+    db = SessionLocal()
+    try:
+        target = models.Target(domain=f"stop-{uuid4().hex}.example")
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+        scan = models.Scan(target_id=target.id, status="running", stage="ffuf", progress=68, config={})
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    monkeypatch.setattr("app.main.cancel_scan", lambda stopped_scan_id: 2 if stopped_scan_id == scan_id else 0)
+    response = TestClient(app).post(f"/api/scans/{scan_id}/stop")
+
+    assert response.status_code == 200
+    assert response.json()["killed"] == 2
+    db = SessionLocal()
+    try:
+        stopped = db.get(models.Scan, scan_id)
+        assert stopped.status == "stopping"
+        assert stopped.stage == "ffuf"
+        assert stopped.error == "Scan stop requested by user"
+    finally:
+        db.close()
+
+
+def test_manual_arjun_endpoint_queues_existing_scan_and_clears_old_arjun_rows(monkeypatch):
+    init_db()
+    db = SessionLocal()
+    try:
+        target = models.Target(domain=f"arjun-{uuid4().hex}.example")
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+        scan = models.Scan(target_id=target.id, status="complete", stage="complete", progress=100, config={"run_arjun": False})
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        db.add(models.ParameterResult(target_id=target.id, scan_id=scan.id, source_url=f"https://api.{target.domain}/search", base_url=f"https://api.{target.domain}/search", param="debug", method="GET", source="arjun-get", first_seen_scan_id=scan.id))
+        db.commit()
+        scan_id = scan.id
+    finally:
+        db.close()
+
+    tasks = []
+    monkeypatch.setattr("app.main.run_scan_task.delay", lambda queued_scan_id, stage: tasks.append((queued_scan_id, stage)) or type("Task", (), {"id": "task-1"})())
+    response = TestClient(app).post(f"/api/scans/{scan_id}/arjun", json={"subset_urls": ["https://api.example/search"], "arjun_methods": "GET"})
+
+    assert response.status_code == 200
+    assert tasks == [(scan_id, "arjun")]
+    db = SessionLocal()
+    try:
+        queued = db.get(models.Scan, scan_id)
+        assert queued.status == "queued"
+        assert queued.stage == "queued:arjun"
+        assert queued.config["run_arjun"] is True
+        assert queued.config["subset_urls"] == ["https://api.example/search"]
+        assert db.query(models.ParameterResult).filter_by(scan_id=scan_id, source="arjun-get").count() == 0
+    finally:
+        db.close()

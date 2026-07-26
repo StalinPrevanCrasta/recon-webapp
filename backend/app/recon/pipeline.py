@@ -60,6 +60,10 @@ BUNDLED_SUBDOMAIN_WORDLISTS = (
 )
 
 
+class ScanStopped(RuntimeError):
+    """Raised when a user-requested stop should halt the scan cleanly."""
+
+
 def clean_domain(domain: str) -> str:
     return domain.strip().lower().removeprefix("http://").removeprefix("https://").split('/')[0]
 
@@ -77,6 +81,12 @@ def set_scan(db: Session, scan: models.Scan, stage: str, progress: int, status: 
     if error:
         scan.error = error
     db.commit()
+
+
+def ensure_scan_not_stopped(db: Session, scan: models.Scan) -> None:
+    db.refresh(scan)
+    if scan.status in {"stopping", "stopped"}:
+        raise ScanStopped("Scan stopped by user")
 
 
 def raw_path(scan_id: int, stage: str, tool: str, suffix: str = "txt") -> Path:
@@ -433,6 +443,7 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     use_cache = bool(config.get("use_cached_subdomains", True))
     fresh_only = bool(config.get("fresh_subdomain_scan", False))
     refresh_passive = bool(config.get("refresh_passive_subdomains", True))
+    use_crtsh = bool(config.get("use_crtsh", False))
     cached_names = [] if fresh_only or not use_cache else cached_subdomain_names(db, target.id)
     seen: set[str] = {domain, *cached_names}
     batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(domain, "root", 0)])
@@ -444,7 +455,6 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
 
     if refresh_passive:
         subfinder_out = raw_path(scan.id, "subdomains", "subfinder")
-        crtsh_out = raw_path(scan.id, "subdomains", "crtsh")
         with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
             futures = [
                 exc.submit(
@@ -456,8 +466,10 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
                     subfinder_timeout,
                     command,
                 ),
-                exc.submit(_run_crtsh, domain, crtsh_out),
             ]
+            if use_crtsh:
+                crtsh_out = raw_path(scan.id, "subdomains", "crtsh")
+                futures.append(exc.submit(_run_crtsh, domain, crtsh_out))
             if config.get("run_amass", False):
                 amass_out = raw_path(scan.id, "subdomains", "amass")
                 futures.append(exc.submit(_run_enum_tool, "amass", build_amass_command, domain, amass_out, amass_timeout, command))
@@ -832,113 +844,8 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
     return stats
 
 
-def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
-    config = scan.config or {}
-    command = _command_for_scan(scan.id)
-    settings = load_settings()
-    domain = scan.target.domain
-    query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
-    if urls:
-        query = query.filter(models.HttpxResult.url.in_(urls))
-    live_urls = [r.url for r in query.all()]
-    stats = {"total_sources": 0, "parameters": 0, "suspicious": 0, "failed": False}
-
-    raw_texts: list[tuple[str, str]] = []
-    endpoint_urls: set[str] = set()
-    parameter_timeout = int(config.get("parameter_timeout", 240))
-    katana_crawl_duration = str(config.get("katana_crawl_duration") or "2m")
-    arjun_only = bool(config.get("arjun_only", False))
-
-    if arjun_only:
-        selected_urls = [url for url in (urls or config.get("subset_urls") or []) if url]
-        endpoint_urls.update(selected_urls)
-        selected_out = raw_path(scan.id, "parameters", "arjun-selected-urls")
-        selected_out.write_text("\n".join(sorted(endpoint_urls)), encoding="utf-8")
-        record_raw(db, scan.id, "parameters", "arjun-selected-urls", selected_out)
-    else:
-        gau_out = raw_path(scan.id, "parameters", "gau")
-        try:
-            stdout, stderr = _call_command(command, build_gau_command(domain), timeout=min(parameter_timeout, 120))
-        except CommandError as exc:
-            stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
-            raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
-        except Exception as exc:
-            stdout, stderr = "", str(exc)
-            raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
-        gau_out.write_text(stdout, encoding="utf-8")
-        if stderr:
-            raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
-        record_raw(db, scan.id, "parameters", "gau", gau_out)
-        raw_texts.append(("gau", stdout))
-        endpoint_urls.update(extract_endpoint_urls(stdout))
-
-        if live_urls:
-            katana_in = raw_path(scan.id, "parameters", "katana-input")
-            katana_out = raw_path(scan.id, "parameters", "katana")
-            katana_in.write_text("\n".join(live_urls), encoding="utf-8")
-            try:
-                _call_command(
-                    command,
-                    build_katana_command(
-                        katana_in,
-                        katana_out,
-                        int(config.get("katana_depth", 2)),
-                        bool(config.get("run_katana_headless", False)),
-                        katana_crawl_duration,
-                    ),
-                    timeout=parameter_timeout,
-                )
-            except CommandError as exc:
-                if not katana_out.exists():
-                    katana_out.write_text(exc.stdout or "", encoding="utf-8")
-                raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
-            except Exception as exc:
-                if not katana_out.exists():
-                    katana_out.write_text("", encoding="utf-8")
-                raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
-            if not katana_out.exists():
-                katana_out.write_text("", encoding="utf-8")
-            record_raw(db, scan.id, "parameters", "katana", katana_out)
-            katana_text = katana_out.read_text(errors="ignore")
-            raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_text))
-            endpoint_urls.update(extract_endpoint_urls(katana_text))
-
-    if config.get("run_arjun", True) and endpoint_urls:
-        arjun_in = raw_path(scan.id, "parameters", "arjun-input")
-        arjun_methods = [m.strip().upper() for m in str(config.get("arjun_methods") or "GET").split(",") if m.strip()]
-        arjun_methods = [m for m in arjun_methods if m in {"GET", "POST", "JSON", "XML", "HEADERS"}] or ["GET"]
-        arjun_in.write_text("\n".join(sorted(endpoint_urls)), encoding="utf-8")
-        headers = {"User-Agent": settings.user_agent, **(settings.headers or {})}
-        arjun_timeout = int(config.get("arjun_timeout", max(parameter_timeout, 240)))
-        for method in arjun_methods:
-            arjun_out = raw_path(scan.id, "parameters", f"arjun-{method.lower()}", "json")
-            try:
-                _call_command(
-                    command,
-                    build_arjun_command(
-                        arjun_in,
-                        arjun_out,
-                        method,
-                        int(config.get("arjun_threads", 5)),
-                        int(config.get("arjun_request_timeout", 10)),
-                        headers,
-                        bool(config.get("arjun_stable", True)),
-                    ),
-                    timeout=arjun_timeout,
-                )
-            except CommandError as exc:
-                if not arjun_out.exists():
-                    arjun_out.write_text(exc.stdout or "", encoding="utf-8")
-                raw_path(scan.id, "parameters", f"arjun-{method.lower()}-note").write_text(str(exc), encoding="utf-8")
-            except Exception as exc:
-                if not arjun_out.exists():
-                    arjun_out.write_text("", encoding="utf-8")
-                raw_path(scan.id, "parameters", f"arjun-{method.lower()}-note").write_text(str(exc), encoding="utf-8")
-            if not arjun_out.exists():
-                arjun_out.write_text("", encoding="utf-8")
-            record_raw(db, scan.id, "parameters", f"arjun-{method.lower()}", arjun_out)
-            raw_texts.append((f"arjun-{method.lower()}", arjun_out.read_text(errors="ignore")))
-
+def _persist_parameter_texts(db: Session, scan: models.Scan, raw_texts: list[tuple[str, str]]) -> dict:
+    stats = {"total_sources": len(raw_texts), "parameters": 0, "suspicious": 0, "failed": False}
     existing = {
         (r.source_url, r.param, r.method)
         for r in db.query(models.ParameterResult.source_url, models.ParameterResult.param, models.ParameterResult.method).filter_by(scan_id=scan.id).all()
@@ -968,8 +875,129 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
     for obj in to_add:
         db.add(obj)
     db.commit()
-    stats["total_sources"] = len(raw_texts)
     return stats
+
+
+def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
+    config = scan.config or {}
+    command = _command_for_scan(scan.id)
+    domain = scan.target.domain
+    query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
+    if urls:
+        query = query.filter(models.HttpxResult.url.in_(urls))
+    live_urls = [r.url for r in query.all()]
+    raw_texts: list[tuple[str, str]] = []
+    parameter_timeout = int(config.get("parameter_timeout", 240))
+    katana_crawl_duration = str(config.get("katana_crawl_duration") or "2m")
+
+    gau_out = raw_path(scan.id, "parameters", "gau")
+    try:
+        stdout, stderr = _call_command(command, build_gau_command(domain), timeout=min(parameter_timeout, 120))
+    except CommandError as exc:
+        stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
+        raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
+    except Exception as exc:
+        stdout, stderr = "", str(exc)
+        raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
+    gau_out.write_text(stdout, encoding="utf-8")
+    if stderr:
+        raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
+    record_raw(db, scan.id, "parameters", "gau", gau_out)
+    raw_texts.append(("gau", stdout))
+
+    if live_urls:
+        katana_in = raw_path(scan.id, "parameters", "katana-input")
+        katana_out = raw_path(scan.id, "parameters", "katana")
+        katana_in.write_text("\n".join(live_urls), encoding="utf-8")
+        try:
+            _call_command(
+                command,
+                build_katana_command(
+                    katana_in,
+                    katana_out,
+                    int(config.get("katana_depth", 2)),
+                    bool(config.get("run_katana_headless", False)),
+                    katana_crawl_duration,
+                ),
+                timeout=parameter_timeout,
+            )
+        except CommandError as exc:
+            if not katana_out.exists():
+                katana_out.write_text(exc.stdout or "", encoding="utf-8")
+            raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
+        except Exception as exc:
+            if not katana_out.exists():
+                katana_out.write_text("", encoding="utf-8")
+            raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
+        if not katana_out.exists():
+            katana_out.write_text("", encoding="utf-8")
+        record_raw(db, scan.id, "parameters", "katana", katana_out)
+        katana_text = katana_out.read_text(errors="ignore")
+        raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_text))
+
+    return _persist_parameter_texts(db, scan, raw_texts)
+
+
+def run_arjun(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
+    config = scan.config or {}
+    command = _command_for_scan(scan.id)
+    settings = load_settings()
+    parameter_timeout = int(config.get("parameter_timeout", 240))
+    selected_urls = [url for url in (urls or config.get("subset_urls") or []) if url]
+    if selected_urls:
+        endpoint_urls = set(selected_urls)
+    else:
+        endpoint_urls = {
+            r.source_url
+            for r in db.query(models.ParameterResult.source_url, models.ParameterResult.source)
+            .filter_by(scan_id=scan.id)
+            .all()
+            if r.source_url and not str(r.source or "").startswith("arjun-")
+        }
+    if not endpoint_urls:
+        skipped_out = raw_path(scan.id, "arjun", "arjun-skipped")
+        skipped_out.write_text("No parameter discovery endpoint URLs were available for Arjun.\n", encoding="utf-8")
+        record_raw(db, scan.id, "arjun", "arjun-skipped", skipped_out)
+        return {"total_sources": 0, "parameters": 0, "suspicious": 0, "failed": False}
+
+    arjun_in = raw_path(scan.id, "arjun", "arjun-input")
+    arjun_methods = [m.strip().upper() for m in str(config.get("arjun_methods") or "GET").split(",") if m.strip()]
+    arjun_methods = [m for m in arjun_methods if m in {"GET", "POST", "JSON", "XML", "HEADERS"}] or ["GET"]
+    arjun_in.write_text("\n".join(sorted(endpoint_urls)), encoding="utf-8")
+    record_raw(db, scan.id, "arjun", "arjun-input", arjun_in)
+    headers = {"User-Agent": settings.user_agent, **(settings.headers or {})}
+    arjun_timeout = int(config.get("arjun_timeout", max(parameter_timeout, 240)))
+    raw_texts: list[tuple[str, str]] = []
+    for method in arjun_methods:
+        arjun_out = raw_path(scan.id, "arjun", f"arjun-{method.lower()}", "json")
+        try:
+            _call_command(
+                command,
+                build_arjun_command(
+                    arjun_in,
+                    arjun_out,
+                    method,
+                    int(config.get("arjun_threads", 5)),
+                    int(config.get("arjun_request_timeout", 10)),
+                    headers,
+                    bool(config.get("arjun_stable", True)),
+                ),
+                timeout=arjun_timeout,
+            )
+        except CommandError as exc:
+            if not arjun_out.exists():
+                arjun_out.write_text(exc.stdout or "", encoding="utf-8")
+            raw_path(scan.id, "arjun", f"arjun-{method.lower()}-note").write_text(str(exc), encoding="utf-8")
+        except Exception as exc:
+            if not arjun_out.exists():
+                arjun_out.write_text("", encoding="utf-8")
+            raw_path(scan.id, "arjun", f"arjun-{method.lower()}-note").write_text(str(exc), encoding="utf-8")
+        if not arjun_out.exists():
+            arjun_out.write_text("", encoding="utf-8")
+        record_raw(db, scan.id, "arjun", f"arjun-{method.lower()}", arjun_out)
+        raw_texts.append((f"arjun-{method.lower()}", arjun_out.read_text(errors="ignore")))
+
+    return _persist_parameter_texts(db, scan, raw_texts)
 
 
 def run_screenshots(db: Session, scan: models.Scan) -> None:
@@ -1000,42 +1028,63 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
     scan = db.get(models.Scan, scan_id)
     if not scan:
         return
-    clear_scan_raw(db, scan_id, stage_only)
-    scan.started_at = datetime.now(UTC)
-    set_scan(db, scan, stage_only or "subdomains", 5)
     try:
+        ensure_scan_not_stopped(db, scan)
+        clear_scan_raw(db, scan_id, stage_only)
+        scan.started_at = datetime.now(UTC)
+        set_scan(db, scan, stage_only or "subdomains", 5)
         ffuf_stats = None
         urls: list[str] | None = None
 
         if stage_only in (None, "subdomains"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "subdomains", 10)
             enumerate_subdomains(db, scan)
+            ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_naabu", True) and stage_only in (None, "naabu"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "naabu", 30)
             run_naabu(db, scan)
+            ensure_scan_not_stopped(db, scan)
 
         if stage_only in (None, "httpx"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "httpx", 45)
             urls = run_httpx(db, scan)
+            ensure_scan_not_stopped(db, scan)
         elif scan.config:
             urls = scan.config.get("subset_urls")
 
-        if stage_only in (None, "wappalyzer", "ffuf", "parameters") and not (scan.config or {}).get("arjun_only", False):
+        if stage_only in (None, "wappalyzer", "ffuf", "parameters"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "wappalyzer", 58)
             run_wappalyzer(db, scan, urls)
+            ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_ffuf", True) and stage_only in (None, "ffuf"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "ffuf", 68)
             ffuf_stats = run_ffuf(db, scan, urls)
+            ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_parameters", True) and stage_only in (None, "parameters", "ffuf"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "parameters", 78)
             run_parameters(db, scan, urls)
+            ensure_scan_not_stopped(db, scan)
+
+        if stage_only == "arjun":
+            ensure_scan_not_stopped(db, scan)
+            set_scan(db, scan, "arjun", 84)
+            run_arjun(db, scan, urls)
+            ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_screenshots", True) and stage_only in (None, "screenshots"):
+            ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "screenshots", 88)
             run_screenshots(db, scan)
+            ensure_scan_not_stopped(db, scan)
 
         scan.finished_at = datetime.now(UTC)
         if ffuf_stats and ffuf_stats.get("failed_hosts"):
@@ -1043,10 +1092,20 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             set_scan(db, scan, "partial", 100, "partial", error)
         else:
             set_scan(db, scan, "complete", 100, "complete")
+    except ScanStopped:
+        db.rollback()
+        scan = db.get(models.Scan, scan_id)
+        if scan:
+            progress = scan.progress or 0
+            scan.finished_at = datetime.now(UTC)
+            set_scan(db, scan, "stopped", progress, "stopped", "Scan stopped by user")
     except Exception as e:
         db.rollback()
         scan = db.get(models.Scan, scan_id)
         if scan:
             progress = scan.progress or 0
             scan.finished_at = datetime.now(UTC)
-            set_scan(db, scan, "failed", progress, "failed", str(e))
+            if scan.status == "stopping":
+                set_scan(db, scan, "stopped", progress, "stopped", "Scan stopped by user")
+            else:
+                set_scan(db, scan, "failed", progress, "failed", str(e))

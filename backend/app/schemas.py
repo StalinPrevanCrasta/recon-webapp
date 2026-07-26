@@ -13,6 +13,7 @@ class RunScanRequest(BaseModel):
     recursion_depth: int = Field(default=2, ge=0, le=5)
     subfinder_timeout: int = Field(default=300, ge=30, le=1800)
     subfinder_recursive: bool = False
+    use_crtsh: bool = False
     use_cached_subdomains: bool = True
     refresh_passive_subdomains: bool = True
     fresh_subdomain_scan: bool = False
@@ -44,7 +45,7 @@ class RunScanRequest(BaseModel):
     run_katana_headless: bool = False
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
     katana_crawl_duration: str = "2m"
-    run_arjun: bool = True
+    run_arjun: bool = False
     arjun_only: bool = False
     arjun_methods: str = "GET"
     arjun_timeout: int = Field(default=240, ge=30, le=3600)
@@ -59,6 +60,7 @@ class StageRerunRequest(BaseModel):
     dirb_wordlist_id: int | None = None
     subfinder_timeout: int = 300
     subfinder_recursive: bool = False
+    use_crtsh: bool = False
     use_cached_subdomains: bool = True
     refresh_passive_subdomains: bool = True
     fresh_subdomain_scan: bool = False
@@ -89,7 +91,7 @@ class StageRerunRequest(BaseModel):
     run_katana_headless: bool = False
     parameter_timeout: int = 240
     katana_crawl_duration: str = "2m"
-    run_arjun: bool = True
+    run_arjun: bool = False
     arjun_only: bool = False
     arjun_methods: str = "GET"
     arjun_timeout: int = 240
@@ -102,3 +104,12 @@ class InterestingPatch(BaseModel):
     interesting: bool = True
     note: str | None = None
     tag: str | None = None
+
+
+class ArjunRunRequest(BaseModel):
+    subset_urls: list[str] | None = None
+    arjun_methods: str = "GET"
+    arjun_timeout: int = Field(default=240, ge=30, le=3600)
+    arjun_threads: int = Field(default=5, ge=1, le=20)
+    arjun_request_timeout: int = Field(default=10, ge=3, le=60)
+    arjun_stable: bool = True

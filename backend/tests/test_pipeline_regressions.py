@@ -152,6 +152,39 @@ def test_enumerate_subdomains_commits_subfinder_results_before_amass(monkeypatch
         db.close()
 
 
+def test_execute_scan_marks_stopped_when_stop_requested_between_stages(monkeypatch):
+    db, _, scan = make_scan({"run_naabu": True, "run_ffuf": False, "run_parameters": False, "run_screenshots": False})
+    scan_id = scan.id
+    db.close()
+    events = []
+
+    def stop_after_subdomains(db, scan):
+        events.append("subdomains")
+        scan.status = "stopping"
+        db.commit()
+        return ["a.example"]
+
+    def should_not_run(*args, **kwargs):
+        events.append("unexpected")
+        return []
+
+    monkeypatch.setattr(pipeline, "enumerate_subdomains", stop_after_subdomains)
+    monkeypatch.setattr(pipeline, "run_naabu", should_not_run)
+    monkeypatch.setattr(pipeline, "run_httpx", should_not_run)
+    monkeypatch.setattr(pipeline, "run_wappalyzer", should_not_run)
+
+    db = SessionLocal()
+    try:
+        pipeline.execute_scan(db, scan_id)
+        row = db.get(models.Scan, scan_id)
+        assert events == ["subdomains"]
+        assert row.status == "stopped"
+        assert row.stage == "stopped"
+        assert row.error == "Scan stopped by user"
+    finally:
+        db.close()
+
+
 def test_enumerate_subdomains_includes_root_domain(monkeypatch, tmp_path):
     db, target, scan = make_scan()
     monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
@@ -174,6 +207,53 @@ def test_enumerate_subdomains_includes_root_domain(monkeypatch, tmp_path):
         assert target.domain in names
         row = db.query(models.Subdomain).filter_by(target_id=target.id, name=target.domain).one()
         assert row.sources == ["root"]
+    finally:
+        db.close()
+
+
+def test_enumerate_subdomains_skips_crtsh_by_default(monkeypatch, tmp_path):
+    db, target, scan = make_scan()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "crtsh", lambda domain: (_ for _ in ()).throw(AssertionError("crtsh should not run by default")))
+
+    def fake_run_command(cmd, timeout=None):
+        if cmd[0] == "subfinder":
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_text("api.example.com\n", encoding="utf-8")
+            return "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        names = pipeline.enumerate_subdomains(db, scan)
+        assert "api.example.com" in names
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id).all()}
+        assert "subfinder" in raw_tools
+        assert "crtsh" not in raw_tools
+    finally:
+        db.close()
+
+
+def test_enumerate_subdomains_uses_crtsh_only_when_enabled(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"use_crtsh": True})
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "crtsh", lambda domain: {f"cert.{domain}"})
+
+    def fake_run_command(cmd, timeout=None):
+        if cmd[0] == "subfinder":
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_text("", encoding="utf-8")
+            return "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        names = pipeline.enumerate_subdomains(db, scan)
+        assert f"cert.{target.domain}" in names
+        row = db.query(models.Subdomain).filter_by(target_id=target.id, name=f"cert.{target.domain}").one()
+        assert row.sources == ["crtsh"]
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id).all()}
+        assert "crtsh" in raw_tools
     finally:
         db.close()
 
@@ -232,9 +312,8 @@ def test_fresh_subdomain_scan_limits_downstream_to_current_scan(monkeypatch, tmp
         db.close()
 
 
-def test_run_parameters_arjun_only_uses_selected_urls(monkeypatch, tmp_path):
+def test_run_arjun_uses_selected_urls(monkeypatch, tmp_path):
     db, target, scan = make_scan({
-        "arjun_only": True,
         "run_arjun": True,
         "subset_urls": ["https://api.example.test/search", "https://app.example.test/login"],
         "arjun_methods": "GET",
@@ -254,14 +333,14 @@ def test_run_parameters_arjun_only_uses_selected_urls(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pipeline, "run_command", fake_run_command)
     try:
-        stats = pipeline.run_parameters(db, scan, scan.config["subset_urls"])
+        stats = pipeline.run_arjun(db, scan, scan.config["subset_urls"])
         assert arjun_inputs == [["https://api.example.test/search", "https://app.example.test/login"]]
         assert stats["parameters"] == 2
         rows = db.query(models.ParameterResult).filter_by(scan_id=scan.id).order_by(models.ParameterResult.param).all()
         assert [r.param for r in rows] == ["redirect_url", "user_id"]
         assert all(r.source == "arjun-get" for r in rows)
-        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="parameters").all()}
-        assert "arjun-selected-urls" in raw_tools
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="arjun").all()}
+        assert "arjun-input" in raw_tools
         assert "gau" not in raw_tools
         assert "katana" not in raw_tools
     finally:
