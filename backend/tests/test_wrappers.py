@@ -58,6 +58,9 @@ def test_wappalyzer_balanced_command_and_json_parser(tmp_path):
     assert parse_wappalyzer_json('{"https://a.example":[{"name":"Strapi"},{"name":"Nginx"}]}') == {
         "https://a.example": ["Nginx", "Strapi"]
     }
+    assert parse_wappalyzer_json('{"https://a.example":{"WordPress":{"confidence":100},"PHP":{"categories":["Programming languages"]},"Open Graph":{"groups":["Other"]}}}') == {
+        "https://a.example": ["Open Graph", "PHP", "WordPress"]
+    }
 
 
 def test_parse_httpx_jsonl_extracts_required_fields():

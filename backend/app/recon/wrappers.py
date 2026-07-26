@@ -100,7 +100,19 @@ def parse_wappalyzer_json(text: str) -> dict[str, list[str]]:
                         names.append(str(name))
             return names
         if isinstance(value, dict):
-            return tech_names(value.get("technologies") or value.get("tech") or value.get("detected") or [])
+            nested = value.get("technologies") or value.get("tech") or value.get("detected")
+            if nested:
+                return tech_names(nested)
+            metadata_keys = {"url", "target", "input", "host", "status", "status_code", "technologies", "tech", "detected"}
+            names = []
+            for key, details in value.items():
+                if key in metadata_keys:
+                    continue
+                if isinstance(details, dict) and (
+                    "confidence" in details or "categories" in details or "groups" in details or "version" in details
+                ):
+                    names.append(str(key))
+            return names
         return []
 
     if isinstance(data, dict):
