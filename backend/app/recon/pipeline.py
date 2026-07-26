@@ -18,9 +18,9 @@ from sqlalchemy.orm import Session
 from app import models
 from app.recon.runner import CommandError, CommandRunner, run_command as _run_command
 from app.recon.wrappers import (
-    build_amass_command, build_ffuf_command, build_gau_command, build_gowitness_command, build_httpx_command, build_katana_command, build_naabu_command,
+    build_amass_command, build_arjun_command, build_ffuf_command, build_gau_command, build_gowitness_command, build_httpx_command, build_katana_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
-    parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json, extract_parameters_from_urls,
+    parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json, extract_endpoint_urls, extract_parameters_from_urls, parse_arjun_json,
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
@@ -795,6 +795,7 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
 def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
     config = scan.config or {}
     command = _command_for_scan(scan.id)
+    settings = load_settings()
     domain = scan.target.domain
     query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
     if urls:
@@ -803,6 +804,7 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
     stats = {"total_sources": 0, "parameters": 0, "suspicious": 0, "failed": False}
 
     raw_texts: list[tuple[str, str]] = []
+    endpoint_urls: set[str] = set()
     parameter_timeout = int(config.get("parameter_timeout", 240))
     katana_crawl_duration = str(config.get("katana_crawl_duration") or "2m")
     gau_out = raw_path(scan.id, "parameters", "gau")
@@ -819,6 +821,7 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
         raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
     record_raw(db, scan.id, "parameters", "gau", gau_out)
     raw_texts.append(("gau", stdout))
+    endpoint_urls.update(extract_endpoint_urls(stdout))
 
     if live_urls:
         katana_in = raw_path(scan.id, "parameters", "katana-input")
@@ -847,7 +850,45 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
         if not katana_out.exists():
             katana_out.write_text("", encoding="utf-8")
         record_raw(db, scan.id, "parameters", "katana", katana_out)
-        raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_out.read_text(errors="ignore")))
+        katana_text = katana_out.read_text(errors="ignore")
+        raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_text))
+        endpoint_urls.update(extract_endpoint_urls(katana_text))
+
+    if config.get("run_arjun", True) and endpoint_urls:
+        arjun_in = raw_path(scan.id, "parameters", "arjun-input")
+        arjun_methods = [m.strip().upper() for m in str(config.get("arjun_methods") or "GET").split(",") if m.strip()]
+        arjun_methods = [m for m in arjun_methods if m in {"GET", "POST", "JSON", "XML", "HEADERS"}] or ["GET"]
+        arjun_in.write_text("\n".join(sorted(endpoint_urls)), encoding="utf-8")
+        headers = {"User-Agent": settings.user_agent, **(settings.headers or {})}
+        arjun_timeout = int(config.get("arjun_timeout", max(parameter_timeout, 240)))
+        for method in arjun_methods:
+            arjun_out = raw_path(scan.id, "parameters", f"arjun-{method.lower()}", "json")
+            try:
+                _call_command(
+                    command,
+                    build_arjun_command(
+                        arjun_in,
+                        arjun_out,
+                        method,
+                        int(config.get("arjun_threads", 5)),
+                        int(config.get("arjun_request_timeout", 10)),
+                        headers,
+                        bool(config.get("arjun_stable", True)),
+                    ),
+                    timeout=arjun_timeout,
+                )
+            except CommandError as exc:
+                if not arjun_out.exists():
+                    arjun_out.write_text(exc.stdout or "", encoding="utf-8")
+                raw_path(scan.id, "parameters", f"arjun-{method.lower()}-note").write_text(str(exc), encoding="utf-8")
+            except Exception as exc:
+                if not arjun_out.exists():
+                    arjun_out.write_text("", encoding="utf-8")
+                raw_path(scan.id, "parameters", f"arjun-{method.lower()}-note").write_text(str(exc), encoding="utf-8")
+            if not arjun_out.exists():
+                arjun_out.write_text("", encoding="utf-8")
+            record_raw(db, scan.id, "parameters", f"arjun-{method.lower()}", arjun_out)
+            raw_texts.append((f"arjun-{method.lower()}", arjun_out.read_text(errors="ignore")))
 
     existing = {
         (r.source_url, r.param, r.method)
@@ -856,7 +897,8 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
     prior_cache: dict[tuple[str, str], int] = {}
     to_add: list[models.ParameterResult] = []
     for source, text in raw_texts:
-        for item in extract_parameters_from_urls(text, source):
+        parsed_items = parse_arjun_json(text, source) if source.startswith("arjun-") else extract_parameters_from_urls(text, source)
+        for item in parsed_items:
             key = (item["source_url"], item["param"], item["method"])
             if key in existing:
                 continue

@@ -256,6 +256,28 @@ def build_katana_command(
     return cmd
 
 
+def build_arjun_command(
+    input_file: Path,
+    output_file: Path,
+    method: str = "GET",
+    threads: int = 5,
+    request_timeout: int = 10,
+    headers: dict[str, str] | None = None,
+    stable: bool = True,
+) -> list[str]:
+    cmd = [
+        "arjun", "-i", str(input_file), "-oJ", str(output_file), "-m", method.upper(),
+        "-t", str(threads), "-T", str(request_timeout), "-q", "--disable-redirects",
+    ]
+    if stable:
+        cmd.append("--stable")
+    if headers:
+        header_text = "\n".join(f"{key}: {value}" for key, value in headers.items() if key and value)
+        if header_text:
+            cmd.extend(["--headers", header_text])
+    return cmd
+
+
 SUSPICIOUS_PARAMETER_PATTERNS = [
     ("redirect", re.compile(r"redirect|redir|return|returnurl|next|continue|callback|url|uri|dest|destination", re.I)),
     ("file/path", re.compile(r"(^|_)(file|path|page|template|folder|dir|download|upload|document|doc|include)($|_)", re.I)),
@@ -328,6 +350,33 @@ def _param_pairs_from_body(value: str | dict | list) -> list[tuple[str, str]]:
     return []
 
 
+def extract_endpoint_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        candidates: list[str] = []
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict):
+                candidates = _candidate_urls_from_item(item)
+            elif isinstance(item, str):
+                candidates = [item]
+        except json.JSONDecodeError:
+            candidates = [line]
+        for candidate in candidates:
+            parsed = urlparse(str(candidate))
+            if not parsed.scheme or not parsed.netloc:
+                continue
+            normalized = str(candidate).strip()
+            if normalized not in seen:
+                seen.add(normalized)
+                urls.append(normalized)
+    return urls
+
+
 def extract_parameters_from_urls(text: str, source: str = "url") -> list[dict]:
     seen: set[tuple[str, str, str]] = set()
     rows: list[dict] = []
@@ -377,4 +426,50 @@ def extract_parameters_from_urls(text: str, source: str = "url") -> list[dict]:
                     "suspicious": suspicious,
                     "reason": reason,
                 })
+    return rows
+
+
+def parse_arjun_json(text: str, source: str = "arjun") -> list[dict]:
+    if not text.strip():
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    rows: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for url, details in data.items():
+        if not isinstance(details, dict):
+            continue
+        method = str(details.get("method") or "GET").upper()
+        params = details.get("params") or []
+        if isinstance(params, dict):
+            params = list(params.keys())
+        if not isinstance(params, list):
+            continue
+        parsed = urlparse(str(url))
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+        for param in params:
+            name = str(param).strip()
+            if not name:
+                continue
+            key = (str(url), name, method)
+            if key in seen:
+                continue
+            seen.add(key)
+            suspicious, reason = classify_parameter_name(name)
+            rows.append({
+                "source_url": str(url),
+                "base_url": base_url,
+                "param": name,
+                "sample_value": None,
+                "method": method,
+                "source": source,
+                "suspicious": suspicious,
+                "reason": reason,
+            })
     return rows

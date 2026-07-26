@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_amass_command, build_gau_command, build_httpx_command, build_katana_command, build_ffuf_command, build_naabu_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_wappalyzer_json, extract_parameters_from_urls
+from app.recon.wrappers import build_amass_command, build_arjun_command, build_gau_command, build_httpx_command, build_katana_command, build_ffuf_command, build_naabu_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_wappalyzer_json, extract_endpoint_urls, extract_parameters_from_urls, parse_arjun_json
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -132,6 +132,12 @@ def test_parameter_discovery_commands_and_parser(tmp_path):
     assert "2m" in katana_cmd
     assert "-headless" in katana_cmd
     assert "-no-sandbox" in katana_cmd
+    arjun_cmd = build_arjun_command(infile, outfile, "POST", 4, 9, {"User-Agent": "test-agent"}, True)
+    assert arjun_cmd[:5] == ["arjun", "-i", str(infile), "-oJ", str(outfile)]
+    assert ["-m", "POST"] == arjun_cmd[5:7]
+    assert "--stable" in arjun_cmd
+    assert "--headers" in arjun_cmd
+    assert "User-Agent: test-agent" in arjun_cmd
 
     rows = extract_parameters_from_urls("https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example\n", "gau")
     assert rows == [{
@@ -162,3 +168,11 @@ def test_parameter_discovery_commands_and_parser(tmp_path):
     assert [row["param"] for row in post_rows] == ["username", "token"]
     assert post_rows[1]["suspicious"] is True
     assert post_rows[1]["reason"] == "auth/session"
+
+    endpoints = extract_endpoint_urls('{"url":"https://a.example/api"}\nhttps://a.example/search?q=1\n')
+    assert endpoints == ["https://a.example/api", "https://a.example/search?q=1"]
+
+    arjun_rows = parse_arjun_json('{"https://a.example/api":{"params":["token","page"],"method":"GET","headers":{}}}', "arjun-get")
+    assert [row["param"] for row in arjun_rows] == ["token", "page"]
+    assert arjun_rows[0]["source"] == "arjun-get"
+    assert arjun_rows[0]["suspicious"] is True
