@@ -1,9 +1,10 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './style.css';
 
 const API = '/api';
-const TABS = ['Subdomains', 'Live Hosts', 'Content Paths', 'Screenshots', 'Raw Logs'];
+const TABS = ['Subdomains', 'Live Hosts', 'Content Paths', 'Parameters', 'Screenshots', 'Raw Logs'];
+const INTERESTING_STATUS_CODES = new Set([200, 204, 301, 302, 401, 403, 500]);
 
 async function j(url, options = {}) {
   const isForm = options.body instanceof FormData;
@@ -16,11 +17,22 @@ async function j(url, options = {}) {
 }
 
 function usePoll(scanId, onTick, enabled = true) {
+  const onTickRef = useRef(onTick);
+  const inFlightRef = useRef(false);
+  useEffect(() => { onTickRef.current = onTick; }, [onTick]);
   useEffect(() => {
     if (!scanId || !enabled) return;
-    const id = setInterval(async () => onTick?.(), 2000);
+    const id = setInterval(async () => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      try {
+        await onTickRef.current?.();
+      } finally {
+        inFlightRef.current = false;
+      }
+    }, 3000);
     return () => clearInterval(id);
-  }, [scanId, onTick, enabled]);
+  }, [scanId, enabled]);
 }
 
 function fmtDuration(scan) {
@@ -108,6 +120,8 @@ function tagsFor(row) {
   if (row.confidence === 'confirmed') tags.push('Confirmed');
   if (row.confidence === 'possible') tags.push('Possible');
   if (row.confidence === 'filtered') tags.push('Filtered');
+  if (INTERESTING_STATUS_CODES.has(Number(row.status_code))) tags.push('Interesting Status');
+  if (row.suspicious) tags.push('Suspicious Param');
   if (/admin|manage|console|dashboard/.test(haystack)) tags.push('Admin');
   if (/login|signin|sso|auth/.test(haystack)) tags.push('Login');
   if (/api|graphql|swagger|openapi/.test(haystack)) tags.push('API');
@@ -185,6 +199,7 @@ function ProgressPanel({scan, result}) {
   const liveHosts = http.length;
   const taggedHosts = http.filter(h => (h.tech || []).length).length;
   const dirs = result?.dirs || [];
+  const parameters = result?.parameters || [];
   const confirmed = dirs.filter(d => d.confidence === 'confirmed').length;
   const possible = dirs.filter(d => d.confidence === 'possible').length;
   const filtered = dirs.filter(d => d.confidence === 'filtered').length;
@@ -195,6 +210,7 @@ function ProgressPanel({scan, result}) {
     ['httpx', 'Httpx', `${liveHosts}/${totalHosts || '—'}`],
     ['wappalyzer', 'Wappalyzer', `${taggedHosts} tagged`],
     ['ffuf', 'FFUF', `${stageInfo.ffuf?.successful_hosts || 0}/${stageInfo.ffuf?.total || liveHosts || '—'} hosts · ${confirmed} confirmed · ${possible} possible · ${filtered} filtered · ${stageInfo.ffuf?.failed_hosts || 0} failed`],
+    ['parameters', 'Parameters', `${parameters.length} params · ${stageInfo.parameters?.suspicious || 0} suspicious`],
     ['screenshots', 'Gowitness', `${screenshotCount} shots`],
   ];
   if (status === 'complete' || status === 'partial') {
@@ -207,6 +223,7 @@ function ProgressPanel({scan, result}) {
         <em>{liveHosts} live</em>
         <em>{taggedHosts} tagged</em>
         <em>{confirmed} paths</em>
+        <em>{parameters.length} params</em>
         <em>{screenshotCount} shots</em>
         <strong>{scan?.progress || 100}%</strong>
       </div>
@@ -235,7 +252,7 @@ function ProgressPanel({scan, result}) {
 function Header({domain, setDomain, run, result, targets, loadTarget, runDisabled, runError, openTargets, openSettings}) {
   const scan = result?.active_scan;
   const target = result?.target?.domain || 'No target selected';
-  const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} content paths`;
+  const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} content paths | ${result?.parameters?.length || 0} params`;
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
     <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" onClick={openTargets}>Targets</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button><button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
@@ -243,7 +260,7 @@ function Header({domain, setDomain, run, result, targets, loadTarget, runDisable
 }
 
 function Filters({filters, setFilters}) {
-  const chips = ['Alive', 'Interesting', 'APIs', 'Login', 'Admin', 'GraphQL', 'Swagger', 'Takeover'];
+  const chips = ['Alive', 'Interesting Status', 'Interesting', 'Suspicious Param', 'APIs', 'Login', 'Admin', 'GraphQL', 'Swagger', 'Takeover'];
   const toggleChip = chip => setFilters({...filters, chips: filters.chips.includes(chip) ? filters.chips.filter(c => c !== chip) : [...filters.chips, chip]});
   return <>
     <div className="filters compact-filters">
@@ -264,6 +281,8 @@ function applyFilters(rows, filters) {
       (!filters.tech || blob.includes(filters.tech.toLowerCase())) &&
       (!filters.ip || String(row.ip || '').includes(filters.ip)) &&
       (!filters.chips.includes('Interesting') || row.interesting) &&
+      (!filters.chips.includes('Interesting Status') || INTERESTING_STATUS_CODES.has(Number(row.status_code))) &&
+      (!filters.chips.includes('Suspicious Param') || row.suspicious) &&
       (!filters.chips.includes('Alive') || (row.status_code && row.status_code < 500)) &&
       (!filters.chips.includes('APIs') || /api/i.test(blob)) &&
       (!filters.chips.includes('Login') || /login|signin|sso|auth/i.test(blob)) &&
@@ -288,16 +307,16 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
     <Filters filters={filters} setFilters={setFilters}/>
     <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.name).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
     <table><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
-      const value = row.url || row.name;
+      const value = row.url || row.source_url || row.name;
       const tags = tagsFor(row);
       return <tr key={`${kind}-${row.id}`} onClick={() => selectRow({...row, kind})} className={row.is_new ? 'new' : ''}>
         <td onClick={e => e.stopPropagation()}><input type="checkbox" checked={selectedIds.has(row.id)} onChange={e => toggleSelected(row.id, e.target.checked)}/></td>
         <td><div className="host-cell">{faviconFor(value)}<div><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div></div></div></td>
         <td>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : <span className="muted">—</span>}</td>
-        <td>{row.title || row.path || <span className="muted">—</span>}</td>
+        <td>{row.title || row.path || row.param || <span className="muted">—</span>}<div className="subtext">{row.reason || ''}</div></td>
         <td>{row.ip || <span className="muted">—</span>}<div className="subtext">{(row.ports || []).length ? `Ports ${(row.ports || []).join(', ')}` : ''}</div></td>
         <td><TechBadges tech={[...(row.fingerprints || []), ...(row.tech || [])]} /></td>
-        <td>{(row.sources || []).join(', ') || row.base_url || <span className="muted">—</span>}</td>
+        <td>{(row.sources || []).join(', ') || row.source || row.base_url || <span className="muted">—</span>}</td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
         <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
@@ -329,7 +348,7 @@ function DetailsPanel({row, result, close, markInteresting}) {
   const value = row.url || row.name || row.image_path;
   const cdn = compactTech(row.tech).find(t => /cloudfront|cloudflare|akamai|fastly/i.test(t)) || '—';
   const asn = /amazon|aws|cloudfront|s3/i.test((row.tech || []).join(' ')) ? 'Amazon' : /cloudflare/i.test((row.tech || []).join(' ')) ? 'Cloudflare' : '—';
-  return <aside className="details"><button className="close" onClick={close}>Close</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
+  return <aside className="details"><button className="close" onClick={close}>Close</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div><div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div><div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
 }
 
 
@@ -458,21 +477,27 @@ function App() {
   const [targetDrawerOpen, setTargetDrawerOpen] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const targetLoadSequence = useRef(0);
-  const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_mode: 'tech', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_naabu: true, naabu_ports: '80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443', run_amass: false, amass_timeout: 600, wappalyzer_scan_type: 'balanced', wappalyzer_workers: 5, run_ffuf: true, run_screenshots: true, use_subdomains_top1million_110000: false, use_bug_bounty_subdomains_trickest: false});
+  const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_mode: 'tech', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_naabu: true, naabu_ports: '80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443', run_amass: false, amass_timeout: 600, wappalyzer_scan_type: 'balanced', wappalyzer_workers: 5, run_ffuf: true, run_parameters: true, katana_depth: 2, run_katana_headless: false, parameter_timeout: 240, katana_crawl_duration: '2m', run_screenshots: true, use_subdomains_top1million_110000: false, use_bug_bounty_subdomains_trickest: false});
 
-  const refresh = async (targetId = active?.id) => {
+  const refreshMeta = useCallback(async () => {
     const [targetRows, wordlistRows, appSettings, healthInfo] = await Promise.all([j(`${API}/targets`), j(`${API}/wordlists`), j(`${API}/settings`), j(`${API}/health`)]);
     setTargets(targetRows); setWordlists(wordlistRows); setSettings(appSettings); setHealth(healthInfo);
+  }, []);
+  const refreshResult = useCallback(async (targetId = active?.id) => {
     if (targetId) {
       const nextResult = await j(`${API}/targets/${targetId}/results`);
       setResult(nextResult);
       setScan(nextResult?.active_scan || null);
     }
-  };
-  useEffect(() => { refresh(); }, []);
-  const scanForPolling = result?.active_scan || scan;
+  }, [active?.id]);
+  const refresh = useCallback(async (targetId = active?.id) => {
+    await refreshMeta();
+    await refreshResult(targetId);
+  }, [active?.id, refreshMeta, refreshResult]);
+  useEffect(() => { refresh(); }, [refresh]);
+  const scanForPolling = result ? result.active_scan : scan;
   const shouldPollScan = Boolean(scanForPolling?.id) && (!scanForPolling?.status || ['queued', 'running'].includes(scanForPolling.status));
-  usePoll(scanForPolling?.id, refresh, shouldPollScan);
+  usePoll(scanForPolling?.id, () => refreshResult(active?.id), shouldPollScan);
 
   async function run() {
     setAlert('');
@@ -524,6 +549,7 @@ function App() {
   const httpOther = httpRows.filter(h => h.status_code !== 200);
   const subdomainRows = (result?.subdomains || []).map(s => ({...s, url: s.name}));
   const dirRows = result?.dirs || [];
+  const parameterRows = result?.parameters || [];
   const scanStatus = result?.active_scan || scan;
   const scanRunning = ['queued', 'running'].includes(scanStatus?.status);
   const defaultFfuf = health?.ffuf;
@@ -539,6 +565,7 @@ function App() {
     <SidebarGroup title="Request Settings">{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
     <SidebarGroup title="Port & Fingerprint"><label><input type="checkbox" checked={opts.run_naabu} onChange={e => setOpts({...opts, run_naabu: e.target.checked})}/> Run Naabu web-port discovery</label><input placeholder="naabu ports" value={opts.naabu_ports} onChange={e => setOpts({...opts, naabu_ports: e.target.value})}/><div className="option-stack always-on"><span className="setting-label">Wappalyzer fingerprinting</span><Badge tone="ok">Always on after httpx</Badge><select value={opts.wappalyzer_scan_type} onChange={e => setOpts({...opts, wappalyzer_scan_type: e.target.value})}><option value="balanced">Balanced</option><option value="fast">Fast</option><option value="full">Full browser mode</option></select><input placeholder="wappalyzer workers" value={opts.wappalyzer_workers} onChange={e => setOpts({...opts, wappalyzer_workers: Number(e.target.value) || 1})}/><p className="hint">Mandatory stage: Wappalyzer runs after httpx on all live hosts before tech-specific FFUF.</p></div></SidebarGroup>
     <SidebarGroup title="FFUF Options"><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label><select value={opts.ffuf_mode} onChange={e => setOpts({...opts, ffuf_mode: e.target.value})}><option value="tech">Tech-specific only</option><option value="combined">Tech-specific + generic</option><option value="generic">Generic only</option></select>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><input placeholder="host timeout seconds" value={opts.ffuf_host_timeout} onChange={e => setOpts({...opts, ffuf_host_timeout: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_auto_calibration} onChange={e => setOpts({...opts, ffuf_auto_calibration: e.target.checked})}/> Auto calibration (-ac)</label><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label><p className="hint">Tech-specific mode uses small focused wordlists based on fingerprints and response headers.</p></SidebarGroup>
+    <SidebarGroup title="Parameter Discovery"><label><input type="checkbox" checked={opts.run_parameters} onChange={e => setOpts({...opts, run_parameters: e.target.checked})}/> Run gau + Katana parameter discovery</label><input placeholder="katana depth" value={opts.katana_depth} onChange={e => setOpts({...opts, katana_depth: Number(e.target.value) || 2})}/><input placeholder="katana crawl duration (2m)" value={opts.katana_crawl_duration} onChange={e => setOpts({...opts, katana_crawl_duration: e.target.value || '2m'})}/><input placeholder="parameter timeout seconds" value={opts.parameter_timeout} onChange={e => setOpts({...opts, parameter_timeout: Number(e.target.value) || 240})}/><label><input type="checkbox" checked={opts.run_katana_headless} onChange={e => setOpts({...opts, run_katana_headless: e.target.checked})}/> Katana headless crawl</label><p className="hint">Extracts GET/POST parameters from gau and bounded Katana crawling, then flags suspicious names like redirect, token, file, url, id, callback.</p></SidebarGroup>
   </Drawer>;
 
   if (!active && !result && !scan) {
@@ -548,10 +575,11 @@ function App() {
   return <><div className="app-shell">
     <Header domain={domain} setDomain={setDomain} run={run} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError} openTargets={() => setTargetDrawerOpen(true)} openSettings={() => setSettingsDrawerOpen(true)}/>{alert && <div className="alert">{alert}</div>}
     <main className="layout">
-    <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus} result={result}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Content Paths' ? dirRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
+    <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus} result={result}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Content Paths' ? dirRows.length : t === 'Parameters' ? parameterRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
       {tab === 'Subdomains' && <AssetTable rows={subdomainRows} kind="subdomains" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
       {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>}
       {tab === 'Content Paths' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
+      {tab === 'Parameters' && <AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
       {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>}
       {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>}
     </section></main>

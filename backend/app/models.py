@@ -118,6 +118,24 @@ class Screenshot(Base):
     interesting: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text)
 
+class ParameterResult(Base):
+    __tablename__ = "parameter_results"
+    __table_args__ = (UniqueConstraint("scan_id", "source_url", "param", "method", name="uq_scan_param_source_method"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
+    source_url: Mapped[str] = mapped_column(String(2048), index=True)
+    base_url: Mapped[str | None] = mapped_column(String(2048), index=True)
+    param: Mapped[str] = mapped_column(String(512), index=True)
+    sample_value: Mapped[str | None] = mapped_column(Text)
+    method: Mapped[str] = mapped_column(String(16), default="GET", index=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    suspicious: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    reason: Mapped[str | None] = mapped_column(Text)
+    first_seen_scan_id: Mapped[int] = mapped_column(Integer, index=True)
+    interesting: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text)
+
 class RawOutput(Base):
     __tablename__ = "raw_outputs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

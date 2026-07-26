@@ -17,6 +17,7 @@ services:
       dockerfile: Dockerfile
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
+      PATH: /root/go/bin:/usr/local/go/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       RECON_DATA_DIR: /data
       DEFAULT_FFUF_WORDLIST: /usr/share/seclists/Discovery/Web-Content/common.txt
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -57,6 +58,7 @@ services:
       dockerfile: Dockerfile
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
     environment:
+      PATH: /root/go/bin:/usr/local/go/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       RECON_DATA_DIR: /data
       DEFAULT_FFUF_WORDLIST: /usr/share/seclists/Discovery/Web-Content/common.txt
       CELERY_BROKER_URL: redis://redis:6379/0

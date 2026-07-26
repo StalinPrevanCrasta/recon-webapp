@@ -11,7 +11,9 @@ RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && 
     go install github.com/ffuf/ffuf/v2@latest && \
     go install github.com/sensepost/gowitness@latest && \
     go install github.com/d3mondev/puredns/v2@latest && \
-    go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+    go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest && \
+    go install github.com/lc/gau/v2/cmd/gau@latest && \
+    go install github.com/projectdiscovery/katana/cmd/katana@latest
 COPY requirements.txt /app/requirements.txt
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /app/requirements.txt
 ENV PATH=/root/go/bin:/opt/venv/bin:$PATH

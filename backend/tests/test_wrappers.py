@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_amass_command, build_httpx_command, build_ffuf_command, build_naabu_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_wappalyzer_json
+from app.recon.wrappers import build_amass_command, build_gau_command, build_httpx_command, build_katana_command, build_ffuf_command, build_naabu_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_wappalyzer_json, extract_parameters_from_urls
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -117,3 +117,48 @@ def test_amass_command_uses_supported_output_prefix_flag(tmp_path):
     assert "-o" not in cmd
     assert "-oA" in cmd
     assert cmd[cmd.index("-oA") + 1] == str(out.with_suffix(""))
+
+
+def test_parameter_discovery_commands_and_parser(tmp_path):
+    infile = tmp_path / "urls.txt"
+    outfile = tmp_path / "katana.txt"
+
+    assert build_gau_command("example.com") == ["gau", "--subs", "example.com"]
+    katana_cmd = build_katana_command(infile, outfile, 3, True)
+    assert ["-list", str(infile)] == katana_cmd[1:3]
+    assert "-jsonl" in katana_cmd
+    assert "-fx" in katana_cmd
+    assert "-ct" in katana_cmd
+    assert "2m" in katana_cmd
+    assert "-headless" in katana_cmd
+    assert "-no-sandbox" in katana_cmd
+
+    rows = extract_parameters_from_urls("https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example\n", "gau")
+    assert rows == [{
+        "source_url": "https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example",
+        "base_url": "https://a.example/search",
+        "param": "q",
+        "sample_value": "test",
+        "method": "GET",
+        "source": "gau",
+        "suspicious": False,
+        "reason": None,
+    }, {
+        "source_url": "https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example",
+        "base_url": "https://a.example/search",
+        "param": "redirect",
+        "sample_value": "https://evil.example",
+        "method": "GET",
+        "source": "gau",
+        "suspicious": True,
+        "reason": "redirect",
+    }]
+
+    post_rows = extract_parameters_from_urls(
+        '{"url":"https://a.example/login","request":{"method":"POST","body":"username=alice&token=abc"}}\n',
+        "katana",
+    )
+    assert [row["method"] for row in post_rows] == ["POST", "POST"]
+    assert [row["param"] for row in post_rows] == ["username", "token"]
+    assert post_rows[1]["suspicious"] is True
+    assert post_rows[1]["reason"] == "auth/session"

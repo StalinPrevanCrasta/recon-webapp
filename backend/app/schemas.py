@@ -35,6 +35,11 @@ class RunScanRequest(BaseModel):
     ffuf_threads: int = Field(default=20, ge=1, le=200)
     ffuf_rate: int | None = Field(default=None, ge=1)
     run_ffuf: bool = True
+    run_parameters: bool = True
+    katana_depth: int = Field(default=2, ge=1, le=5)
+    run_katana_headless: bool = False
+    parameter_timeout: int = Field(default=240, ge=30, le=3600)
+    katana_crawl_duration: str = "2m"
     run_screenshots: bool = True
     subset_urls: list[str] | None = None
 
@@ -64,6 +69,11 @@ class StageRerunRequest(BaseModel):
     ffuf_host_timeout: int = 300
     ffuf_threads: int = 25
     ffuf_rate: int | None = None
+    run_parameters: bool = True
+    katana_depth: int = 2
+    run_katana_headless: bool = False
+    parameter_timeout: int = 240
+    katana_crawl_duration: str = "2m"
     subset_urls: list[str] | None = None
 
 class InterestingPatch(BaseModel):

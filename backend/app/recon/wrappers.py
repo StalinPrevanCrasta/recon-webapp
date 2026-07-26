@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 
 def _headers(user_agent: str | None = None, headers: dict[str, str] | None = None) -> list[str]:
@@ -233,3 +233,148 @@ def build_amass_command(domain: str, output_file: Path) -> list[str]:
 
 def build_puredns_command(domain: str, wordlist: Path, resolvers: Path, output_file: Path) -> list[str]:
     return ["puredns", "bruteforce", str(wordlist), domain, "-r", str(resolvers), "-w", str(output_file), "--write-wildcards", str(output_file.with_suffix('.wildcards.txt'))]
+
+
+def build_gau_command(domain: str) -> list[str]:
+    return ["gau", "--subs", domain]
+
+
+def build_katana_command(
+    input_file: Path,
+    output_file: Path,
+    depth: int = 2,
+    headless: bool = False,
+    crawl_duration: str = "2m",
+) -> list[str]:
+    cmd = [
+        "katana", "-list", str(input_file), "-silent", "-jsonl", "-jc", "-fx", "-kf", "all",
+        "-d", str(depth), "-ct", crawl_duration, "-timeout", "8", "-retry", "0",
+        "-p", "3", "-c", "5", "-rl", "30", "-o", str(output_file),
+    ]
+    if headless:
+        cmd.extend(["-headless", "-no-sandbox"])
+    return cmd
+
+
+SUSPICIOUS_PARAMETER_PATTERNS = [
+    ("redirect", re.compile(r"redirect|redir|return|returnurl|next|continue|callback|url|uri|dest|destination", re.I)),
+    ("file/path", re.compile(r"(^|_)(file|path|page|template|folder|dir|download|upload|document|doc|include)($|_)", re.I)),
+    ("ssrf", re.compile(r"url|uri|host|domain|endpoint|api|webhook|callback|proxy|feed", re.I)),
+    ("auth/session", re.compile(r"token|jwt|key|apikey|api_key|secret|session|sid|auth|password|pass|pwd", re.I)),
+    ("object-id", re.compile(r"(^|_)(id|uid|user|account|profile|org|tenant|role|admin)($|_)", re.I)),
+    ("command", re.compile(r"cmd|exec|command|process|run|debug|shell", re.I)),
+]
+
+
+def classify_parameter_name(name: str) -> tuple[bool, str | None]:
+    reasons = [label for label, pattern in SUSPICIOUS_PARAMETER_PATTERNS if pattern.search(name or "")]
+    return bool(reasons), ", ".join(reasons) if reasons else None
+
+
+def _candidate_urls_from_item(item: dict) -> list[str]:
+    candidates = [item.get("url")]
+    request = item.get("request")
+    if isinstance(request, dict):
+        candidates.extend([request.get("endpoint"), request.get("url")])
+    return [str(value) for value in candidates if value]
+
+
+def _request_method_from_item(item: dict) -> str | None:
+    request = item.get("request")
+    method = request.get("method") if isinstance(request, dict) else item.get("method")
+    return str(method).upper() if method else None
+
+
+def _body_values_from_item(item: dict) -> list[str | dict | list]:
+    values: list[str | dict | list] = []
+    request = item.get("request")
+    containers = [item, request] if isinstance(request, dict) else [item]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("body", "data", "post_data", "payload"):
+            value = container.get(key)
+            if value:
+                values.append(value)
+        form = container.get("form") or container.get("forms")
+        if form:
+            values.append(form)
+    return values
+
+
+def _param_pairs_from_body(value: str | dict | list) -> list[tuple[str, str]]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            decoded = json.loads(stripped)
+            return _param_pairs_from_body(decoded)
+        except json.JSONDecodeError:
+            return [(name, sample) for name, sample in parse_qsl(stripped, keep_blank_values=True) if name]
+    if isinstance(value, dict):
+        pairs: list[tuple[str, str]] = []
+        for key, nested in value.items():
+            if isinstance(nested, (dict, list)):
+                pairs.extend((f"{key}.{child}", sample) for child, sample in _param_pairs_from_body(nested))
+            elif key:
+                pairs.append((str(key), "" if nested is None else str(nested)))
+        return pairs
+    if isinstance(value, list):
+        pairs: list[tuple[str, str]] = []
+        for item in value:
+            pairs.extend(_param_pairs_from_body(item))
+        return pairs
+    return []
+
+
+def extract_parameters_from_urls(text: str, source: str = "url") -> list[dict]:
+    seen: set[tuple[str, str, str]] = set()
+    rows: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict):
+                candidates = _candidate_urls_from_item(item)
+                body_values = _body_values_from_item(item)
+                request_method = _request_method_from_item(item)
+            else:
+                candidates = [line]
+                body_values = []
+                request_method = None
+        except json.JSONDecodeError:
+            candidates = [line]
+            body_values = []
+            request_method = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            parsed = urlparse(str(candidate))
+            if not parsed.scheme or not parsed.netloc:
+                continue
+            base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+            pairs = [(name, value, "GET") for name, value in parse_qsl(parsed.query, keep_blank_values=True)]
+            if request_method and request_method != "GET":
+                pairs.extend((name, value, request_method) for body in body_values for name, value in _param_pairs_from_body(body))
+            for name, value, method in pairs:
+                if not name:
+                    continue
+                key = (str(candidate), name, method)
+                if key in seen:
+                    continue
+                seen.add(key)
+                suspicious, reason = classify_parameter_name(name)
+                rows.append({
+                    "source_url": str(candidate),
+                    "base_url": base_url,
+                    "param": name,
+                    "sample_value": value[:512] if value is not None else None,
+                    "method": method,
+                    "source": source,
+                    "suspicious": suspicious,
+                    "reason": reason,
+                })
+    return rows

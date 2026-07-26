@@ -77,6 +77,38 @@ def _sqlite_add_missing_columns() -> None:
             conn.execute(text("CREATE INDEX ix_port_results_port ON port_results (port)"))
             conn.execute(text("CREATE INDEX ix_port_results_protocol ON port_results (protocol)"))
             conn.execute(text("CREATE INDEX ix_port_results_first_seen_scan_id ON port_results (first_seen_scan_id)"))
+        if "parameter_results" not in tables:
+            conn.execute(text("""
+                CREATE TABLE parameter_results (
+                    id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    scan_id INTEGER NOT NULL,
+                    source_url VARCHAR(2048) NOT NULL,
+                    base_url VARCHAR(2048),
+                    param VARCHAR(512) NOT NULL,
+                    sample_value TEXT,
+                    method VARCHAR(16) DEFAULT 'GET' NOT NULL,
+                    source VARCHAR(64) NOT NULL,
+                    suspicious BOOLEAN DEFAULT 0 NOT NULL,
+                    reason TEXT,
+                    first_seen_scan_id INTEGER NOT NULL,
+                    interesting BOOLEAN DEFAULT 0 NOT NULL,
+                    note TEXT,
+                    PRIMARY KEY (id),
+                    FOREIGN KEY(target_id) REFERENCES targets (id),
+                    FOREIGN KEY(scan_id) REFERENCES scans (id),
+                    CONSTRAINT uq_scan_param_source_method UNIQUE (scan_id, source_url, param, method)
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_parameter_results_target_id ON parameter_results (target_id)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_scan_id ON parameter_results (scan_id)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_source_url ON parameter_results (source_url)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_base_url ON parameter_results (base_url)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_param ON parameter_results (param)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_method ON parameter_results (method)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_source ON parameter_results (source)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_suspicious ON parameter_results (suspicious)"))
+            conn.execute(text("CREATE INDEX ix_parameter_results_first_seen_scan_id ON parameter_results (first_seen_scan_id)"))
 
 
 def init_db() -> None:

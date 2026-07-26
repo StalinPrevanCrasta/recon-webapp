@@ -16,11 +16,11 @@ import httpx as pyhttpx
 from sqlalchemy.orm import Session
 
 from app import models
-from app.recon.runner import CommandRunner, run_command as _run_command
+from app.recon.runner import CommandError, CommandRunner, run_command as _run_command
 from app.recon.wrappers import (
-    build_amass_command, build_ffuf_command, build_gowitness_command, build_httpx_command, build_naabu_command,
+    build_amass_command, build_ffuf_command, build_gau_command, build_gowitness_command, build_httpx_command, build_katana_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
-    parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json,
+    parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json, extract_parameters_from_urls,
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
@@ -792,6 +792,95 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
     return stats
 
 
+def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
+    config = scan.config or {}
+    command = _command_for_scan(scan.id)
+    domain = scan.target.domain
+    query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
+    if urls:
+        query = query.filter(models.HttpxResult.url.in_(urls))
+    live_urls = [r.url for r in query.all()]
+    stats = {"total_sources": 0, "parameters": 0, "suspicious": 0, "failed": False}
+
+    raw_texts: list[tuple[str, str]] = []
+    parameter_timeout = int(config.get("parameter_timeout", 240))
+    katana_crawl_duration = str(config.get("katana_crawl_duration") or "2m")
+    gau_out = raw_path(scan.id, "parameters", "gau")
+    try:
+        stdout, stderr = _call_command(command, build_gau_command(domain), timeout=min(parameter_timeout, 120))
+    except CommandError as exc:
+        stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
+        raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
+    except Exception as exc:
+        stdout, stderr = "", str(exc)
+        raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
+    gau_out.write_text(stdout, encoding="utf-8")
+    if stderr:
+        raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
+    record_raw(db, scan.id, "parameters", "gau", gau_out)
+    raw_texts.append(("gau", stdout))
+
+    if live_urls:
+        katana_in = raw_path(scan.id, "parameters", "katana-input")
+        katana_out = raw_path(scan.id, "parameters", "katana")
+        katana_in.write_text("\n".join(live_urls), encoding="utf-8")
+        try:
+            _call_command(
+                command,
+                build_katana_command(
+                    katana_in,
+                    katana_out,
+                    int(config.get("katana_depth", 2)),
+                    bool(config.get("run_katana_headless", False)),
+                    katana_crawl_duration,
+                ),
+                timeout=parameter_timeout,
+            )
+        except CommandError as exc:
+            if not katana_out.exists():
+                katana_out.write_text(exc.stdout or "", encoding="utf-8")
+            raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
+        except Exception as exc:
+            if not katana_out.exists():
+                katana_out.write_text("", encoding="utf-8")
+            raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
+        if not katana_out.exists():
+            katana_out.write_text("", encoding="utf-8")
+        record_raw(db, scan.id, "parameters", "katana", katana_out)
+        raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_out.read_text(errors="ignore")))
+
+    existing = {
+        (r.source_url, r.param, r.method)
+        for r in db.query(models.ParameterResult.source_url, models.ParameterResult.param, models.ParameterResult.method).filter_by(scan_id=scan.id).all()
+    }
+    prior_cache: dict[tuple[str, str], int] = {}
+    to_add: list[models.ParameterResult] = []
+    for source, text in raw_texts:
+        for item in extract_parameters_from_urls(text, source):
+            key = (item["source_url"], item["param"], item["method"])
+            if key in existing:
+                continue
+            existing.add(key)
+            cache_key = (item["param"], item["method"])
+            if cache_key not in prior_cache:
+                prior = db.query(models.ParameterResult).filter_by(target_id=scan.target_id, param=item["param"], method=item["method"]).order_by(models.ParameterResult.id.asc()).first()
+                prior_cache[cache_key] = prior.first_seen_scan_id if prior else scan.id
+            to_add.append(models.ParameterResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_cache[cache_key], **item))
+            stats["parameters"] += 1
+            if item.get("suspicious"):
+                stats["suspicious"] += 1
+            if len(to_add) >= FFUF_RESULT_BATCH_SIZE:
+                for obj in to_add:
+                    db.add(obj)
+                db.commit()
+                to_add.clear()
+    for obj in to_add:
+        db.add(obj)
+    db.commit()
+    stats["total_sources"] = len(raw_texts)
+    return stats
+
+
 def run_screenshots(db: Session, scan: models.Scan) -> None:
     settings = load_settings()
     command = _command_for_scan(scan.id)
@@ -841,7 +930,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         elif scan.config:
             urls = scan.config.get("subset_urls")
 
-        if stage_only in (None, "wappalyzer", "ffuf"):
+        if stage_only in (None, "wappalyzer", "ffuf", "parameters"):
             set_scan(db, scan, "wappalyzer", 58)
             run_wappalyzer(db, scan, urls)
 
@@ -849,8 +938,12 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             set_scan(db, scan, "ffuf", 68)
             ffuf_stats = run_ffuf(db, scan, urls)
 
+        if (scan.config or {}).get("run_parameters", True) and stage_only in (None, "parameters", "ffuf"):
+            set_scan(db, scan, "parameters", 78)
+            run_parameters(db, scan, urls)
+
         if (scan.config or {}).get("run_screenshots", True) and stage_only in (None, "screenshots"):
-            set_scan(db, scan, "screenshots", 85)
+            set_scan(db, scan, "screenshots", 88)
             run_screenshots(db, scan)
 
         scan.finished_at = datetime.now(UTC)
