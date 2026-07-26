@@ -12,6 +12,7 @@ class RunScanRequest(BaseModel):
     dirb_wordlist_id: int | None = None
     recursion_depth: int = Field(default=2, ge=0, le=5)
     subfinder_timeout: int = Field(default=300, ge=30, le=1800)
+    run_amass: bool = False
     use_subdomains_top1million_110000: bool = False
     use_bug_bounty_subdomains_trickest: bool = False
     run_naabu: bool = True
@@ -20,7 +21,7 @@ class RunScanRequest(BaseModel):
     wappalyzer_scan_type: str = "balanced"
     wappalyzer_workers: int = Field(default=5, ge=1, le=20)
     wappalyzer_timeout: int = Field(default=1800, ge=30, le=7200)
-    amass_timeout: int = Field(default=120, ge=30, le=1800)
+    amass_timeout: int = Field(default=600, ge=30, le=1800)
     extensions: str = ""
     ffuf_recursive: bool = False
     ffuf_match_codes: str = "all"
@@ -41,7 +42,8 @@ class StageRerunRequest(BaseModel):
     stage: str
     dirb_wordlist_id: int | None = None
     subfinder_timeout: int = 300
-    amass_timeout: int = 120
+    run_amass: bool = False
+    amass_timeout: int = 600
     use_subdomains_top1million_110000: bool = False
     use_bug_bounty_subdomains_trickest: bool = False
     run_naabu: bool = True

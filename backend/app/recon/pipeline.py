@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.recon.runner import CommandRunner, run_command as _run_command
 from app.recon.wrappers import (
-    build_ffuf_command, build_gowitness_command, build_httpx_command, build_naabu_command,
+    build_amass_command, build_ffuf_command, build_gowitness_command, build_httpx_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
     parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json,
 )
@@ -33,6 +33,7 @@ run_command = _run_command
 SCAN_CONCURRENT_ENUM = int(os.getenv("SCAN_CONCURRENT_ENUM", "2"))
 SCAN_FFUF_PARALLEL = int(os.getenv("SCAN_FFUF_PARALLEL", "2"))
 SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "500"))
+FFUF_RESULT_BATCH_SIZE = int(os.getenv("FFUF_RESULT_BATCH_SIZE", "50"))
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 RAW_DIR = DATA_DIR / "raw"
@@ -383,8 +384,10 @@ def _persist_enum_result(db: Session, scan: models.Scan, source: str, result: En
         return []
     names = _parse_new_names(result.out, seen)
     record_raw(db, scan.id, "subdomains", result.tool, result.out)
-    batch_upsert_subdomains(db, scan.target_id, scan.id, [SubdomainDiscovery(name, source, depth) for name in names])
-    db.commit()
+    for start in range(0, len(names), 100):
+        batch = names[start:start + 100]
+        batch_upsert_subdomains(db, scan.target_id, scan.id, [SubdomainDiscovery(name, source, depth) for name in batch])
+        db.commit()
     return names
 
 
@@ -406,6 +409,7 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     brute_wordlists = _subdomain_bruteforce_wordlists(db, config)
     depth_max = int(config.get("recursion_depth", 2))
     subfinder_timeout = int(config.get("subfinder_timeout", 300))
+    amass_timeout = int(config.get("amass_timeout", 600))
     command = _command_for_scan(scan.id)
     seen: set[str] = {domain}
     batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(domain, "root", 0)])
@@ -418,6 +422,9 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
             exc.submit(_run_enum_tool, "subfinder", build_subfinder_command, domain, subfinder_out, subfinder_timeout, command),
             exc.submit(_run_crtsh, domain, crtsh_out),
         ]
+        if config.get("run_amass", False):
+            amass_out = raw_path(scan.id, "subdomains", "amass")
+            futures.append(exc.submit(_run_enum_tool, "amass", build_amass_command, domain, amass_out, amass_timeout, command))
         for future in as_completed(futures):
             result = future.result()
             _persist_enum_result(db, scan, result.tool, result, seen)
@@ -439,7 +446,10 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
                         names = _parse_new_names(out, seen)
                         record_raw(db, scan.id, f"subdomains-depth-{depth}", brute_wordlist.source, out)
                         if names:
-                            batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(name, brute_wordlist.source, depth) for name in names])
+                            for start in range(0, len(names), 100):
+                                batch = names[start:start + 100]
+                                batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(name, brute_wordlist.source, depth) for name in batch])
+                                db.commit()
                             next_frontier.update(names)
                     except Exception as e:
                         out.write_text(str(e))
@@ -448,7 +458,9 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
             for item in mutations:
                 seen.add(item.name)
             if mutations:
-                batch_upsert_subdomains(db, target.id, scan.id, mutations)
+                for start in range(0, len(mutations), 100):
+                    batch_upsert_subdomains(db, target.id, scan.id, mutations[start:start + 100])
+                    db.commit()
             frontier = next_frontier
             db.commit()
     db.commit()
@@ -733,27 +745,20 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
         for row in http_rows
     ]
 
-    results: list[FfufHostResult] = []
-    with ThreadPoolExecutor(max_workers=SCAN_FFUF_PARALLEL) as exc:
-        future_map = {exc.submit(_ffuf_host, context, command): context.url for context in contexts}
-        for future in as_completed(future_map):
-            result = future.result()
-            results.append(result)
-            if result.items is not None:
-                stats["successful_hosts"] += 1
-                record_raw(db, scan.id, "ffuf", "ffuf", result.out)
-                if result.baseline_out:
-                    record_raw(db, scan.id, "ffuf", "ffuf-baseline", result.baseline_out)
-            elif result.error:
-                stats["failed_hosts"] += 1
-                stats["errors"].append(result.error)
-                record_raw(db, scan.id, "ffuf", "ffuf-error", result.out)
-
     prior_dirb_cache: dict[tuple[str, str], int] = {}
-    to_add = []
-    for result in results:
+    to_add: list[models.DirbResult] = []
+
+    def flush_results(force: bool = False) -> None:
+        if not to_add or (not force and len(to_add) < FFUF_RESULT_BATCH_SIZE):
+            return
+        for obj in to_add:
+            db.add(obj)
+        db.commit()
+        to_add.clear()
+
+    def queue_result_items(result: FfufHostResult) -> None:
         if result.items is None:
-            continue
+            return
         for item in result.items:
             dedupe_key = (result.url, item.get("normalized_path"), item.get("method"))
             if dedupe_key in existing_paths:
@@ -766,14 +771,24 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
                 prior = db.query(models.DirbResult).filter_by(target_id=scan.target_id, normalized_path=normalized_path, method=method).order_by(models.DirbResult.id.asc()).first()
                 prior_dirb_cache[cache_key] = prior.first_seen_scan_id if prior else scan.id
             to_add.append(models.DirbResult(target_id=scan.target_id, scan_id=scan.id, base_url=result.url, first_seen_scan_id=prior_dirb_cache[cache_key], headers_sent=settings.headers, **item))
-            if len(to_add) >= SCAN_BATCH_SIZE:
-                for obj in to_add:
-                    db.add(obj)
-                db.flush()
-                to_add.clear()
-    for obj in to_add:
-        db.add(obj)
-    db.commit()
+            flush_results()
+
+    with ThreadPoolExecutor(max_workers=SCAN_FFUF_PARALLEL) as exc:
+        future_map = {exc.submit(_ffuf_host, context, command): context.url for context in contexts}
+        for future in as_completed(future_map):
+            result = future.result()
+            if result.items is not None:
+                stats["successful_hosts"] += 1
+                record_raw(db, scan.id, "ffuf", "ffuf", result.out)
+                if result.baseline_out:
+                    record_raw(db, scan.id, "ffuf", "ffuf-baseline", result.baseline_out)
+                queue_result_items(result)
+            elif result.error:
+                stats["failed_hosts"] += 1
+                stats["errors"].append(result.error)
+                record_raw(db, scan.id, "ffuf", "ffuf-error", result.out)
+            flush_results()
+    flush_results(force=True)
     return stats
 
 
