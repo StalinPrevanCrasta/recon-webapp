@@ -15,12 +15,12 @@ async function j(url, options = {}) {
   return body;
 }
 
-function usePoll(scanId, onTick) {
+function usePoll(scanId, onTick, enabled = true) {
   useEffect(() => {
-    if (!scanId) return;
+    if (!scanId || !enabled) return;
     const id = setInterval(async () => onTick?.(), 2000);
     return () => clearInterval(id);
-  }, [scanId, onTick]);
+  }, [scanId, onTick, enabled]);
 }
 
 function fmtDuration(scan) {
@@ -470,7 +470,9 @@ function App() {
     }
   };
   useEffect(() => { refresh(); }, []);
-  usePoll(scan?.id, refresh);
+  const scanForPolling = result?.active_scan || scan;
+  const shouldPollScan = Boolean(scanForPolling?.id) && (!scanForPolling?.status || ['queued', 'running'].includes(scanForPolling.status));
+  usePoll(scanForPolling?.id, refresh, shouldPollScan);
 
   async function run() {
     setAlert('');
