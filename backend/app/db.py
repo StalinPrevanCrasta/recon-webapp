@@ -109,6 +109,41 @@ def _sqlite_add_missing_columns() -> None:
             conn.execute(text("CREATE INDEX ix_parameter_results_source ON parameter_results (source)"))
             conn.execute(text("CREATE INDEX ix_parameter_results_suspicious ON parameter_results (suspicious)"))
             conn.execute(text("CREATE INDEX ix_parameter_results_first_seen_scan_id ON parameter_results (first_seen_scan_id)"))
+        if "js_findings" not in tables:
+            conn.execute(text("""
+                CREATE TABLE js_findings (
+                    id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    scan_id INTEGER NOT NULL,
+                    page_url VARCHAR(2048),
+                    source_url VARCHAR(2048) NOT NULL,
+                    file_path VARCHAR(2048),
+                    finding_type VARCHAR(64) NOT NULL,
+                    severity VARCHAR(32) DEFAULT 'info' NOT NULL,
+                    indicator VARCHAR(1024) NOT NULL,
+                    evidence TEXT,
+                    line INTEGER,
+                    column INTEGER,
+                    confidence VARCHAR(32) DEFAULT 'heuristic' NOT NULL,
+                    tags JSON DEFAULT '[]' NOT NULL,
+                    first_seen_scan_id INTEGER NOT NULL,
+                    interesting BOOLEAN DEFAULT 0 NOT NULL,
+                    note TEXT,
+                    PRIMARY KEY (id),
+                    FOREIGN KEY(target_id) REFERENCES targets (id),
+                    FOREIGN KEY(scan_id) REFERENCES scans (id),
+                    CONSTRAINT uq_scan_js_finding UNIQUE (scan_id, source_url, finding_type, indicator)
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_js_findings_target_id ON js_findings (target_id)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_scan_id ON js_findings (scan_id)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_page_url ON js_findings (page_url)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_source_url ON js_findings (source_url)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_finding_type ON js_findings (finding_type)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_severity ON js_findings (severity)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_indicator ON js_findings (indicator)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_confidence ON js_findings (confidence)"))
+            conn.execute(text("CREATE INDEX ix_js_findings_first_seen_scan_id ON js_findings (first_seen_scan_id)"))
 
 
 def init_db() -> None:

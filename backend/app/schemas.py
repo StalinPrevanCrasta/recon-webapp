@@ -41,6 +41,11 @@ class RunScanRequest(BaseModel):
     ffuf_rate: int | None = Field(default=None, ge=1)
     run_ffuf: bool = True
     run_parameters: bool = True
+    run_js_intel: bool = True
+    js_intel_max_hosts: int = Field(default=80, ge=1, le=1000)
+    js_intel_max_scripts_per_host: int = Field(default=25, ge=1, le=200)
+    js_intel_max_bytes: int = Field(default=2000000, ge=100000, le=10000000)
+    js_intel_timeout: int = Field(default=180, ge=30, le=1800)
     katana_depth: int = Field(default=2, ge=1, le=5)
     run_katana_headless: bool = False
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
@@ -87,6 +92,11 @@ class StageRerunRequest(BaseModel):
     ffuf_threads: int = 25
     ffuf_rate: int | None = None
     run_parameters: bool = True
+    run_js_intel: bool = True
+    js_intel_max_hosts: int = 80
+    js_intel_max_scripts_per_host: int = 25
+    js_intel_max_bytes: int = 2000000
+    js_intel_timeout: int = 180
     katana_depth: int = 2
     run_katana_headless: bool = False
     parameter_timeout: int = 240

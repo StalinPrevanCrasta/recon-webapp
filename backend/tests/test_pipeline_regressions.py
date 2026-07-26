@@ -418,6 +418,7 @@ def test_execute_scan_clears_stale_raw_files_for_reused_scan_id(monkeypatch, tmp
     monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: [])
     monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: {})
+    monkeypatch.setattr(pipeline, "run_js_intel", lambda db, scan, urls=None: {})
     monkeypatch.setattr(pipeline, "run_parameters", lambda db, scan, urls=None: {})
 
     db = SessionLocal()
@@ -471,6 +472,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: events.append("naabu") or [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
     monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: events.append("wappalyzer") or {})
+    monkeypatch.setattr(pipeline, "run_js_intel", lambda db, scan, urls=None: events.append("js_intel") or {})
     monkeypatch.setattr(pipeline, "run_ffuf", lambda db, scan, urls=None: events.append("ffuf") or {"successful_hosts": 0, "failed_hosts": 1, "errors": [{"url": "https://a.example", "error": "timeout"}]})
     monkeypatch.setattr(pipeline, "run_parameters", lambda db, scan, urls=None: events.append("parameters") or {})
     monkeypatch.setattr(pipeline, "run_screenshots", lambda db, scan: events.append("screenshots"))
@@ -479,7 +481,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     try:
         pipeline.execute_scan(db, scan_id)
         row = db.get(models.Scan, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "ffuf", "parameters", "screenshots"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "ffuf", "parameters", "screenshots"]
         assert row.status == "partial"
         assert row.stage == "partial"
         assert "FFUF had 1 host failure" in row.error
@@ -496,11 +498,28 @@ def test_execute_scan_always_runs_wappalyzer_after_httpx(monkeypatch):
     monkeypatch.setattr(pipeline, "run_naabu", lambda db, scan: events.append("naabu") or [])
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
     monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: events.append("wappalyzer") or {})
+    monkeypatch.setattr(pipeline, "run_js_intel", lambda db, scan, urls=None: events.append("js_intel") or {})
     monkeypatch.setattr(pipeline, "run_parameters", lambda db, scan, urls=None: events.append("parameters") or {})
 
     db = SessionLocal()
     try:
         pipeline.execute_scan(db, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "parameters"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "parameters"]
     finally:
         db.close()
+
+
+def test_analyze_js_text_finds_endpoints_secrets_and_source_sink():
+    text = """
+      const api = "/api/v1/users";
+      const key = "AIzaSyAaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const input = new URLSearchParams(location.search).get("next");
+      document.querySelector("#out").innerHTML = input;
+    """
+
+    findings = pipeline.analyze_js_text(text, "https://app.example.com/app.js", "https://app.example.com", "example.com")
+    pairs = {(row["finding_type"], row["indicator"]) for row in findings}
+
+    assert ("endpoint", "/api/v1/users") in pairs
+    assert ("secret", "Google API key") in pairs
+    assert any(row["finding_type"] == "source-sink" and row["severity"] == "high" for row in findings)

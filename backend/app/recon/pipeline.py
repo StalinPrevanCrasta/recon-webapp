@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Sequence
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx as pyhttpx
 from sqlalchemy import or_
@@ -35,6 +35,7 @@ SCAN_CONCURRENT_ENUM = int(os.getenv("SCAN_CONCURRENT_ENUM", "2"))
 SCAN_FFUF_PARALLEL = int(os.getenv("SCAN_FFUF_PARALLEL", "2"))
 SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "500"))
 FFUF_RESULT_BATCH_SIZE = int(os.getenv("FFUF_RESULT_BATCH_SIZE", "50"))
+JS_INTEL_BATCH_SIZE = int(os.getenv("JS_INTEL_BATCH_SIZE", "50"))
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 RAW_DIR = DATA_DIR / "raw"
@@ -58,6 +59,35 @@ BUNDLED_SUBDOMAIN_WORDLISTS = (
     ("use_subdomains_top1million_110000", "puredns-top1m-110k", WORDLIST_DIR / "subdomain" / "subdomains-top1million-110000.txt"),
     ("use_bug_bounty_subdomains_trickest", "puredns-trickest", WORDLIST_DIR / "subdomain" / "bug-bounty-program-subdomains-trickest-inventory.txt"),
 )
+
+JS_SECRET_PATTERNS = [
+    ("secret", "high", "AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("secret", "high", "Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b")),
+    ("secret", "high", "Slack token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
+    ("secret", "high", "JWT token", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    ("secret", "medium", "Private key marker", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
+    ("secret", "medium", "Generic secret assignment", re.compile(r"(?i)\b(?:api[_-]?key|secret|token|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*['\"][^'\"\n]{8,}['\"]")),
+]
+JS_ENDPOINT_PATTERN = re.compile(r"['\"]((?:https?:)?//[^'\"\s)]+|/(?:api|graphql|v[0-9]|admin|auth|oauth|sso|internal|private|service|rest|wp-json)[^'\"\s)]*)['\"]", re.I)
+JS_SOURCE_PATTERNS = [
+    ("location.search", re.compile(r"\blocation\.search\b")),
+    ("location.hash", re.compile(r"\blocation\.hash\b")),
+    ("URLSearchParams", re.compile(r"\bURLSearchParams\s*\(")),
+    ("document.cookie", re.compile(r"\bdocument\.cookie\b")),
+    ("localStorage", re.compile(r"\blocalStorage\b")),
+    ("sessionStorage", re.compile(r"\bsessionStorage\b")),
+    ("postMessage/message", re.compile(r"\bpostMessage\b|\baddEventListener\s*\(\s*['\"]message['\"]")),
+]
+JS_SINK_PATTERNS = [
+    ("innerHTML", re.compile(r"\.innerHTML\s*=")),
+    ("outerHTML", re.compile(r"\.outerHTML\s*=")),
+    ("insertAdjacentHTML", re.compile(r"\binsertAdjacentHTML\s*\(")),
+    ("document.write", re.compile(r"\bdocument\.write(?:ln)?\s*\(")),
+    ("eval", re.compile(r"\beval\s*\(")),
+    ("Function constructor", re.compile(r"\bnew\s+Function\s*\(")),
+    ("setTimeout string", re.compile(r"\bset(?:Timeout|Interval)\s*\(\s*['\"]")),
+    ("navigation assignment", re.compile(r"\blocation(?:\.href)?\s*=")),
+]
 
 
 class ScanStopped(RuntimeError):
@@ -716,6 +746,191 @@ def run_wappalyzer(db: Session, scan: models.Scan, urls: list[str] | None = None
     return stats
 
 
+def _line_col(text: str, index: int) -> tuple[int, int]:
+    line = text.count("\n", 0, index) + 1
+    last_newline = text.rfind("\n", 0, index)
+    col = index + 1 if last_newline < 0 else index - last_newline
+    return line, col
+
+
+def _masked_context(text: str, start: int, end: int, window: int = 90) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    match = text[start:end]
+    if len(match) > 12:
+        masked = f"{match[:4]}…{match[-4:]}"
+    else:
+        masked = "…"
+    return (text[left:start] + masked + text[end:right]).replace("\n", " ")[:260]
+
+
+def _script_urls_from_html(html: str, base_url: str) -> list[str]:
+    urls: set[str] = set()
+    for match in re.finditer(r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"][^>]*>", html, re.I):
+        src = (match.group(1) or "").strip()
+        if src and not src.lower().startswith(("data:", "blob:", "javascript:")):
+            urls.add(urljoin(base_url, src))
+    return sorted(urls)
+
+
+def _inline_scripts_from_html(html: str) -> list[str]:
+    scripts = []
+    for match in re.finditer(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.I | re.S):
+        body = (match.group(1) or "").strip()
+        if len(body) >= 40:
+            scripts.append(body)
+    return scripts
+
+
+def _is_same_target_url(candidate: str, target_domain: str) -> bool:
+    host = _host_from_url(candidate)
+    return bool(host and is_subdomain_of(host.split(":")[0], target_domain))
+
+
+def analyze_js_text(text: str, source_url: str, page_url: str | None, target_domain: str) -> list[dict]:
+    findings: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, severity: str, indicator: str, match, tags: list[str], confidence: str = "heuristic"):
+        key = (kind, indicator)
+        if key in seen:
+            return
+        seen.add(key)
+        line, col = _line_col(text, match.start() if hasattr(match, "start") else 0)
+        findings.append({
+            "page_url": page_url,
+            "source_url": source_url,
+            "finding_type": kind,
+            "severity": severity,
+            "indicator": indicator[:1024],
+            "evidence": _masked_context(text, match.start(), match.end()) if hasattr(match, "start") else None,
+            "line": line,
+            "column": col,
+            "confidence": confidence,
+            "tags": tags,
+        })
+
+    for kind, severity, label, pattern in JS_SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            add(kind, severity, label, match, ["secret", "review"])
+
+    for match in JS_ENDPOINT_PATTERN.finditer(text):
+        endpoint = match.group(1).strip()
+        absolute = urljoin(page_url or source_url, endpoint)
+        if endpoint.startswith(("http://", "https://", "//")) and not _is_same_target_url(absolute, target_domain):
+            continue
+        severity = "medium" if re.search(r"/(?:admin|internal|private|oauth|sso|graphql)", endpoint, re.I) else "low"
+        add("endpoint", severity, endpoint, match, ["endpoint", "api"], "pattern")
+
+    if re.search(r"sourceMappingURL=.*\.map", text, re.I) or source_url.endswith(".map"):
+        add("sourcemap", "medium", "Source map reference", re.search(r"sourceMappingURL=.*", text, re.I) or re.match(r".*", source_url), ["source-map", "review"], "pattern")
+
+    source_hits = []
+    sink_hits = []
+    for label, pattern in JS_SOURCE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            source_hits.append(label)
+            add("source", "info", label, match, ["source"])
+    for label, pattern in JS_SINK_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            sink_hits.append(label)
+            add("sink", "medium" if label in {"eval", "Function constructor", "document.write"} else "low", label, match, ["sink", "dom"])
+    if source_hits and sink_hits:
+        indicator = f"{source_hits[0]} → {sink_hits[0]}"
+        first_source = next(p.search(text) for _, p in JS_SOURCE_PATTERNS if p.search(text))
+        add("source-sink", "high", indicator, first_source, ["source-sink", "xss", "manual-review"])
+
+    return findings
+
+
+def _fetch_text(url: str, settings, timeout: int, max_bytes: int) -> tuple[str, dict]:
+    headers = {"User-Agent": settings.user_agent, **(settings.headers or {})}
+    with pyhttpx.Client(headers=headers, proxy=settings.proxy, follow_redirects=True, timeout=timeout) as client:
+        with client.stream("GET", url) as response:
+            chunks = []
+            total = 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    break
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            text = body.decode(response.encoding or "utf-8", errors="ignore")
+            return text, {"status_code": response.status_code, "content_type": response.headers.get("content-type"), "bytes": len(body)}
+
+
+def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
+    config = scan.config or {}
+    settings = load_settings()
+    max_hosts = int(config.get("js_intel_max_hosts", 80))
+    max_scripts = int(config.get("js_intel_max_scripts_per_host", 25))
+    max_bytes = int(config.get("js_intel_max_bytes", 2_000_000))
+    timeout = int(config.get("js_intel_timeout", 180))
+    per_request_timeout = max(5, min(20, timeout // max(1, max_hosts)))
+    query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
+    if urls:
+        query = query.filter(models.HttpxResult.url.in_(urls))
+    hosts = query.order_by(models.HttpxResult.status_code.asc()).limit(max_hosts).all()
+    manifest = {"hosts": len(hosts), "scripts": [], "errors": []}
+    stats = {"hosts": len(hosts), "bundles": 0, "findings": 0, "high": 0, "failed": False}
+    existing = {
+        (r.source_url, r.finding_type, r.indicator)
+        for r in db.query(models.JsFinding.source_url, models.JsFinding.finding_type, models.JsFinding.indicator).filter_by(scan_id=scan.id).all()
+    }
+    pending = []
+    for host in hosts:
+        ensure_scan_not_stopped(db, scan)
+        try:
+            html, meta = _fetch_text(host.url, settings, per_request_timeout, max_bytes)
+        except Exception as exc:
+            manifest["errors"].append({"url": host.url, "error": str(exc)})
+            continue
+        scripts = _script_urls_from_html(html, host.url)[:max_scripts]
+        inline_scripts = _inline_scripts_from_html(html)[:3]
+        sources = [(script_url, None) for script_url in scripts]
+        for idx, script_text in enumerate(inline_scripts, 1):
+            sources.append((f"{host.url}#inline-script-{idx}", script_text))
+        for script_url, inline_text in sources:
+            ensure_scan_not_stopped(db, scan)
+            safe_name = hashlib.sha256(script_url.encode("utf-8")).hexdigest()[:16]
+            out = raw_path(scan.id, "js_intel", safe_name, "js")
+            try:
+                if inline_text is None:
+                    if not _is_same_target_url(script_url, scan.target.domain):
+                        continue
+                    text, script_meta = _fetch_text(script_url, settings, per_request_timeout, max_bytes)
+                else:
+                    text, script_meta = inline_text, {"status_code": meta["status_code"], "content_type": "inline-script", "bytes": len(inline_text)}
+                out.write_text(text, encoding="utf-8", errors="ignore")
+                stats["bundles"] += 1
+                manifest["scripts"].append({"page_url": host.url, "source_url": script_url, "path": str(out), **script_meta})
+                for finding in analyze_js_text(text, script_url, host.url, scan.target.domain):
+                    key = (finding["source_url"], finding["finding_type"], finding["indicator"])
+                    if key in existing:
+                        continue
+                    existing.add(key)
+                    if finding["severity"] == "high":
+                        stats["high"] += 1
+                    pending.append(models.JsFinding(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=scan.id, file_path=str(out), **finding))
+                    if len(pending) >= JS_INTEL_BATCH_SIZE:
+                        db.add_all(pending)
+                        db.commit()
+                        stats["findings"] += len(pending)
+                        pending = []
+            except Exception as exc:
+                manifest["errors"].append({"url": script_url, "error": str(exc)})
+    if pending:
+        db.add_all(pending)
+        db.commit()
+        stats["findings"] += len(pending)
+    manifest_out = raw_path(scan.id, "js_intel", "manifest", "json")
+    manifest_out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    record_raw(db, scan.id, "js_intel", "js-intel-manifest", manifest_out)
+    return stats
+
+
 def _ffuf_host(context: FfufHostContext, command: Callable) -> FfufHostResult:
     safe_url = re.sub(r"[^a-zA-Z0-9_.-]", "_", context.url)
     out = raw_path(context.scan_id, "ffuf", safe_url, "json")
@@ -1056,21 +1271,27 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         elif scan.config:
             urls = scan.config.get("subset_urls")
 
-        if stage_only in (None, "wappalyzer", "ffuf", "parameters"):
+        if stage_only in (None, "wappalyzer", "ffuf", "parameters", "js_intel"):
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "wappalyzer", 58)
             run_wappalyzer(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
+        if (scan.config or {}).get("run_js_intel", True) and stage_only in (None, "js_intel"):
+            ensure_scan_not_stopped(db, scan)
+            set_scan(db, scan, "js_intel", 63)
+            run_js_intel(db, scan, urls)
+            ensure_scan_not_stopped(db, scan)
+
         if (scan.config or {}).get("run_ffuf", True) and stage_only in (None, "ffuf"):
             ensure_scan_not_stopped(db, scan)
-            set_scan(db, scan, "ffuf", 68)
+            set_scan(db, scan, "ffuf", 70)
             ffuf_stats = run_ffuf(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_parameters", True) and stage_only in (None, "parameters", "ffuf"):
             ensure_scan_not_stopped(db, scan)
-            set_scan(db, scan, "parameters", 78)
+            set_scan(db, scan, "parameters", 80)
             run_parameters(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
@@ -1082,7 +1303,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
 
         if (scan.config or {}).get("run_screenshots", True) and stage_only in (None, "screenshots"):
             ensure_scan_not_stopped(db, scan)
-            set_scan(db, scan, "screenshots", 88)
+            set_scan(db, scan, "screenshots", 90)
             run_screenshots(db, scan)
             ensure_scan_not_stopped(db, scan)
 

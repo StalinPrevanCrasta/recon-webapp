@@ -136,6 +136,27 @@ class ParameterResult(Base):
     interesting: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text)
 
+class JsFinding(Base):
+    __tablename__ = "js_findings"
+    __table_args__ = (UniqueConstraint("scan_id", "source_url", "finding_type", "indicator", name="uq_scan_js_finding"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
+    page_url: Mapped[str | None] = mapped_column(String(2048), index=True)
+    source_url: Mapped[str] = mapped_column(String(2048), index=True)
+    file_path: Mapped[str | None] = mapped_column(String(2048))
+    finding_type: Mapped[str] = mapped_column(String(64), index=True)
+    severity: Mapped[str] = mapped_column(String(32), default="info", index=True)
+    indicator: Mapped[str] = mapped_column(String(1024), index=True)
+    evidence: Mapped[str | None] = mapped_column(Text)
+    line: Mapped[int | None] = mapped_column(Integer)
+    column: Mapped[int | None] = mapped_column(Integer)
+    confidence: Mapped[str] = mapped_column(String(32), default="heuristic", index=True)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    first_seen_scan_id: Mapped[int] = mapped_column(Integer, index=True)
+    interesting: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text)
+
 class RawOutput(Base):
     __tablename__ = "raw_outputs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

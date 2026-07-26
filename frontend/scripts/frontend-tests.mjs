@@ -33,6 +33,11 @@ assert.match(src, /Fresh scan only, ignore saved subdomains/, 'scan settings inc
 assert.match(src, /Clear subdomain cache for this target/, 'scan settings include clear subdomain cache action');
 assert.match(src, /Use Subfinder recursive mode/, 'scan settings include optional Subfinder recursive toggle');
 assert.match(src, /Use crt\.sh certificate transparency/, 'scan settings include optional crt.sh toggle');
+assert.match(src, /'JS Intel'/, 'JS Intel has its own top-level page tab');
+assert.match(src, /run_js_intel: true/, 'JS Intel is enabled by default');
+assert.match(src, /Download and analyze JavaScript bundles/, 'scan settings include JS bundle analysis toggle');
+assert.match(src, /source→sink DOM XSS clues/, 'JS Intel settings explain source-sink detection');
+assert.match(src, /js_findings/, 'frontend consumes JS Intel findings from the API');
 assert.match(src, /'Arjun'/, 'Arjun has its own top-level page tab');
 assert.match(src, /\/scans\/\$\{parentScanId\}\/arjun/, 'manual Arjun action calls the dedicated Arjun endpoint');
 assert.match(src, /Arjun Options/, 'scan settings include separate Arjun options');
