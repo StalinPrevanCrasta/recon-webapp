@@ -13,6 +13,7 @@ from typing import Callable, Sequence
 from urllib.parse import urlparse
 
 import httpx as pyhttpx
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app import models
@@ -416,7 +417,7 @@ def scan_subdomain_names(db: Session, scan: models.Scan) -> list[str]:
     config = scan.config or {}
     query = db.query(models.Subdomain.name).filter_by(target_id=scan.target_id)
     if config.get("fresh_subdomain_scan", False) or not config.get("use_cached_subdomains", True):
-        query = query.filter_by(scan_id=scan.id)
+        query = query.filter(or_(models.Subdomain.scan_id == scan.id, models.Subdomain.first_seen_scan_id == scan.id))
     return [row.name for row in query.order_by(models.Subdomain.name).all()]
 
 
@@ -446,7 +447,15 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
         crtsh_out = raw_path(scan.id, "subdomains", "crtsh")
         with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
             futures = [
-                exc.submit(_run_enum_tool, "subfinder", build_subfinder_command, domain, subfinder_out, subfinder_timeout, command),
+                exc.submit(
+                    _run_enum_tool,
+                    "subfinder",
+                    lambda d, o: build_subfinder_command(d, o, bool(config.get("subfinder_recursive", False))),
+                    domain,
+                    subfinder_out,
+                    subfinder_timeout,
+                    command,
+                ),
                 exc.submit(_run_crtsh, domain, crtsh_out),
             ]
             if config.get("run_amass", False):

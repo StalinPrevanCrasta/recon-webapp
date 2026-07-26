@@ -223,8 +223,12 @@ def build_gowitness_command(input_file: Path, output_dir: Path, user_agent: str 
     return cmd
 
 
-def build_subfinder_command(domain: str, output_file: Path) -> list[str]:
-    return ["subfinder", "-d", domain, "-silent", "-all", "-recursive", "-o", str(output_file)]
+def build_subfinder_command(domain: str, output_file: Path, recursive: bool = False) -> list[str]:
+    cmd = ["subfinder", "-d", domain, "-silent", "-all"]
+    if recursive:
+        cmd.append("-recursive")
+    cmd.extend(["-o", str(output_file)])
+    return cmd
 
 
 def build_amass_command(domain: str, output_file: Path) -> list[str]:

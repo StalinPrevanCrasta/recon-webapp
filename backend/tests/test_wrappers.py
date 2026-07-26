@@ -24,9 +24,18 @@ def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
     assert "http://host.docker.internal:8080" in joined
 
 
-def test_subfinder_command_uses_recursive_sources(tmp_path):
+def test_subfinder_command_matches_high_coverage_default(tmp_path):
     out = tmp_path / "subfinder.txt"
     cmd = build_subfinder_command("example.com", out)
+
+    assert "-recursive" not in cmd
+    assert "-all" in cmd
+    assert ["-o", str(out)] == cmd[-2:]
+
+
+def test_subfinder_command_can_enable_recursive_sources(tmp_path):
+    out = tmp_path / "subfinder.txt"
+    cmd = build_subfinder_command("example.com", out, recursive=True)
 
     assert "-recursive" in cmd
     assert "-all" in cmd

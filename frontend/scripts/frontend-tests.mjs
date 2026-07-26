@@ -25,9 +25,11 @@ assert.match(src, /Use bug-bounty-program-subdomains-trickest-inventory\.txt/, '
 assert.match(src, /use_cached_subdomains: true/, 'subdomain cache is enabled by default');
 assert.match(src, /refresh_passive_subdomains: true/, 'passive refresh remains enabled by default');
 assert.match(src, /fresh_subdomain_scan: false/, 'fresh-only scans are disabled by default');
+assert.match(src, /subfinder_recursive: false/, 'Subfinder recursive mode is disabled by default');
 assert.match(src, /Use saved subdomains for this target/, 'scan settings include saved subdomain cache checkbox');
 assert.match(src, /Refresh passive sources now/, 'scan settings include passive refresh checkbox');
 assert.match(src, /Fresh scan only, ignore saved subdomains/, 'scan settings include fresh-only checkbox');
 assert.match(src, /Clear subdomain cache for this target/, 'scan settings include clear subdomain cache action');
+assert.match(src, /Use Subfinder recursive mode/, 'scan settings include optional Subfinder recursive toggle');
 
 console.log('frontend log viewer static tests passed');
