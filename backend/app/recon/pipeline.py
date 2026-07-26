@@ -402,6 +402,24 @@ def _subdomain_bruteforce_wordlists(db: Session, config: dict) -> list[Subdomain
     return wordlists
 
 
+def cached_subdomain_names(db: Session, target_id: int) -> list[str]:
+    return [
+        row.name
+        for row in db.query(models.Subdomain.name)
+        .filter_by(target_id=target_id)
+        .order_by(models.Subdomain.name)
+        .all()
+    ]
+
+
+def scan_subdomain_names(db: Session, scan: models.Scan) -> list[str]:
+    config = scan.config or {}
+    query = db.query(models.Subdomain.name).filter_by(target_id=scan.target_id)
+    if config.get("fresh_subdomain_scan", False) or not config.get("use_cached_subdomains", True):
+        query = query.filter_by(scan_id=scan.id)
+    return [row.name for row in query.order_by(models.Subdomain.name).all()]
+
+
 def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     config = scan.config or {}
     target = scan.target
@@ -411,23 +429,36 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
     subfinder_timeout = int(config.get("subfinder_timeout", 300))
     amass_timeout = int(config.get("amass_timeout", 600))
     command = _command_for_scan(scan.id)
-    seen: set[str] = {domain}
+    use_cache = bool(config.get("use_cached_subdomains", True))
+    fresh_only = bool(config.get("fresh_subdomain_scan", False))
+    refresh_passive = bool(config.get("refresh_passive_subdomains", True))
+    cached_names = [] if fresh_only or not use_cache else cached_subdomain_names(db, target.id)
+    seen: set[str] = {domain, *cached_names}
     batch_upsert_subdomains(db, target.id, scan.id, [SubdomainDiscovery(domain, "root", 0)])
+    if cached_names:
+        cache_out = raw_path(scan.id, "subdomains", "cache")
+        cache_out.write_text("\n".join(cached_names), encoding="utf-8")
+        record_raw(db, scan.id, "subdomains", "cache", cache_out)
     db.commit()
 
-    subfinder_out = raw_path(scan.id, "subdomains", "subfinder")
-    crtsh_out = raw_path(scan.id, "subdomains", "crtsh")
-    with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
-        futures = [
-            exc.submit(_run_enum_tool, "subfinder", build_subfinder_command, domain, subfinder_out, subfinder_timeout, command),
-            exc.submit(_run_crtsh, domain, crtsh_out),
-        ]
-        if config.get("run_amass", False):
-            amass_out = raw_path(scan.id, "subdomains", "amass")
-            futures.append(exc.submit(_run_enum_tool, "amass", build_amass_command, domain, amass_out, amass_timeout, command))
-        for future in as_completed(futures):
-            result = future.result()
-            _persist_enum_result(db, scan, result.tool, result, seen)
+    if refresh_passive:
+        subfinder_out = raw_path(scan.id, "subdomains", "subfinder")
+        crtsh_out = raw_path(scan.id, "subdomains", "crtsh")
+        with ThreadPoolExecutor(max_workers=SCAN_CONCURRENT_ENUM) as exc:
+            futures = [
+                exc.submit(_run_enum_tool, "subfinder", build_subfinder_command, domain, subfinder_out, subfinder_timeout, command),
+                exc.submit(_run_crtsh, domain, crtsh_out),
+            ]
+            if config.get("run_amass", False):
+                amass_out = raw_path(scan.id, "subdomains", "amass")
+                futures.append(exc.submit(_run_enum_tool, "amass", build_amass_command, domain, amass_out, amass_timeout, command))
+            for future in as_completed(futures):
+                result = future.result()
+                _persist_enum_result(db, scan, result.tool, result, seen)
+    else:
+        skipped_out = raw_path(scan.id, "subdomains", "passive-skipped")
+        skipped_out.write_text("Passive subdomain refresh skipped by scan settings.\n", encoding="utf-8")
+        record_raw(db, scan.id, "subdomains", "passive-skipped", skipped_out)
 
     frontier: set[str] = set(seen) or {domain}
     if brute_wordlists:
@@ -469,7 +500,7 @@ def enumerate_subdomains(db: Session, scan: models.Scan) -> list[str]:
 
 def run_naabu(db: Session, scan: models.Scan) -> list[dict]:
     command = _command_for_scan(scan.id)
-    hosts = [r.name for r in db.query(models.Subdomain).filter_by(target_id=scan.target_id).all()]
+    hosts = scan_subdomain_names(db, scan)
     infile = raw_path(scan.id, "naabu", "input")
     outfile = raw_path(scan.id, "naabu", "naabu", "jsonl")
     infile.write_text("\n".join(sorted(set(hosts))))
@@ -568,7 +599,7 @@ def merge_fingerprints(tech: list[str], existing: list[str] | None = None) -> li
 def run_httpx(db: Session, scan: models.Scan) -> list[str]:
     settings = load_settings()
     command = _command_for_scan(scan.id)
-    subs = [r.name for r in db.query(models.Subdomain).filter_by(target_id=scan.target_id).all()]
+    subs = scan_subdomain_names(db, scan)
     port_rows = [r for r in db.query(models.PortResult).filter_by(scan_id=scan.id).all()]
     host_ports: dict[str, list[int]] = {}
     for row in port_rows:

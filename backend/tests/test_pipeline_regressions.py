@@ -178,6 +178,60 @@ def test_enumerate_subdomains_includes_root_domain(monkeypatch, tmp_path):
         db.close()
 
 
+def test_enumerate_subdomains_can_reuse_cache_without_passive_refresh(monkeypatch, tmp_path):
+    db, target, first_scan = make_scan()
+    cached_name = f"cached.{target.domain}"
+    db.add(models.Subdomain(target_id=target.id, scan_id=first_scan.id, first_seen_scan_id=first_scan.id, name=cached_name, sources=["subfinder"], depths=[0]))
+    db.commit()
+    scan = models.Scan(target_id=target.id, status="queued", stage="queued", config={"use_cached_subdomains": True, "refresh_passive_subdomains": False})
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(pipeline, "run_command", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("passive tools should not run")))
+    monkeypatch.setattr(pipeline, "crtsh", lambda domain: (_ for _ in ()).throw(AssertionError("crtsh should not run")))
+
+    try:
+        names = pipeline.enumerate_subdomains(db, scan)
+        assert target.domain in names
+        assert cached_name in names
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id).all()}
+        assert {"cache", "passive-skipped"}.issubset(raw_tools)
+    finally:
+        db.close()
+
+
+def test_fresh_subdomain_scan_limits_downstream_to_current_scan(monkeypatch, tmp_path):
+    db, target, old_scan = make_scan()
+    old_name = f"old.{target.domain}"
+    new_name = f"new.{target.domain}"
+    db.add(models.Subdomain(target_id=target.id, scan_id=old_scan.id, first_seen_scan_id=old_scan.id, name=old_name, sources=["subfinder"], depths=[0]))
+    db.commit()
+    scan = models.Scan(target_id=target.id, status="queued", stage="queued", config={"fresh_subdomain_scan": True, "use_cached_subdomains": False})
+    db.add(scan)
+    db.commit()
+    db.refresh(scan)
+    db.add(models.Subdomain(target_id=target.id, scan_id=scan.id, first_seen_scan_id=scan.id, name=new_name, sources=["subfinder"], depths=[0]))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+
+    def fake_run_command(cmd, timeout=None):
+        infile = Path(cmd[cmd.index("-l") + 1])
+        hosts = set(infile.read_text(encoding="utf-8").splitlines())
+        assert new_name in hosts
+        assert old_name not in hosts
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("", encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        pipeline.run_httpx(db, scan)
+    finally:
+        db.close()
+
+
 def test_httpx_checks_root_domain_when_no_subdomains_discovered(monkeypatch, tmp_path):
     db, target, scan = make_scan()
     db.add(models.Subdomain(target_id=target.id, scan_id=scan.id, first_seen_scan_id=scan.id, name=target.domain, sources=["root"], depths=[0]))

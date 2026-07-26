@@ -151,6 +151,16 @@ def delete_target(target_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "deleted": deleted}
 
 
+@app.delete("/api/targets/{target_id}/subdomains/cache")
+def clear_subdomain_cache(target_id: int, db: Session = Depends(get_db)):
+    target = db.get(models.Target, target_id)
+    if not target:
+        raise HTTPException(404, "target not found")
+    deleted = db.query(models.Subdomain).filter_by(target_id=target_id).delete(synchronize_session=False)
+    db.commit()
+    return {"ok": True, "deleted": {"subdomains": deleted}}
+
+
 
 def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list, dirs: list, parameters: list, screenshots: list, raw: list) -> dict:
     raw_by_stage = {}
@@ -166,8 +176,10 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
         return "not_started"
     ffuf_errors = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf-error"]
     ffuf_success = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf"]
+    new_subdomain_count = len([s for s in subdomains if s.get("is_new")])
+    cached_subdomain_count = max(0, len(subdomains) - new_subdomain_count)
     return {
-        "subdomains": {"status": stage_state("subdomains", len(subdomains)), "results": len(subdomains)},
+        "subdomains": {"status": stage_state("subdomains", len(subdomains)), "results": len(subdomains), "new": new_subdomain_count, "cached": cached_subdomain_count},
         "naabu": {"status": stage_state("naabu", 0), "results": len([r for r in raw_by_stage.get("naabu", []) if r.tool == "naabu"])},
         "httpx": {"status": stage_state("httpx", len(http)), "results": len(http), "total": len(subdomains)},
         "wappalyzer": {"status": stage_state("wappalyzer", len([h for h in http if h.get("tech")])), "results": len([h for h in http if h.get("tech")]), "total": len(http)},
@@ -187,8 +199,11 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         return {"target": {"id": target.id, "domain": target.domain}, "scans": [], "subdomains": [], "http": [], "dirs": [], "parameters": [], "screenshots": [], "raw": []}
     prev = db.query(models.Scan).filter(models.Scan.target_id == target_id, models.Scan.id < scan.id).order_by(models.Scan.id.desc()).first()
     def rowdict(row, keys):
-        d = {k: getattr(row, k) for k in keys}; d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id and bool(prev); return d
-    subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in db.query(models.Subdomain).filter_by(target_id=target_id).all()]
+        d = {k: getattr(row, k) for k in keys}; d["first_seen_scan_id"] = getattr(row, "first_seen_scan_id", None); d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id; return d
+    subdomain_query = db.query(models.Subdomain).filter_by(target_id=target_id)
+    if (scan.config or {}).get("fresh_subdomain_scan", False) or not (scan.config or {}).get("use_cached_subdomains", True):
+        subdomain_query = subdomain_query.filter_by(scan_id=scan.id)
+    subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in subdomain_query.all()]
     ports = [rowdict(r, ["id", "host", "ip", "port", "protocol", "source"]) for r in db.query(models.PortResult).filter_by(scan_id=scan.id).all()]
     http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "fingerprints", "ports", "response_size", "server", "redirect_chain", "ip", "headers_sent", "response_headers", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()]
     dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()]

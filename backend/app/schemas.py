@@ -12,6 +12,9 @@ class RunScanRequest(BaseModel):
     dirb_wordlist_id: int | None = None
     recursion_depth: int = Field(default=2, ge=0, le=5)
     subfinder_timeout: int = Field(default=300, ge=30, le=1800)
+    use_cached_subdomains: bool = True
+    refresh_passive_subdomains: bool = True
+    fresh_subdomain_scan: bool = False
     run_amass: bool = False
     use_subdomains_top1million_110000: bool = False
     use_bug_bounty_subdomains_trickest: bool = False
@@ -53,6 +56,9 @@ class StageRerunRequest(BaseModel):
     stage: str
     dirb_wordlist_id: int | None = None
     subfinder_timeout: int = 300
+    use_cached_subdomains: bool = True
+    refresh_passive_subdomains: bool = True
+    fresh_subdomain_scan: bool = False
     run_amass: bool = False
     amass_timeout: int = 600
     use_subdomains_top1million_110000: bool = False

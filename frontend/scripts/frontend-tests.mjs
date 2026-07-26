@@ -22,5 +22,12 @@ assert.match(src, /use_subdomains_top1million_110000: false/, 'top 110k DNS brut
 assert.match(src, /use_bug_bounty_subdomains_trickest: false/, 'Trickest DNS brute-force list is disabled by default');
 assert.match(src, /Use subdomains-top1million-110000\.txt/, 'scan settings include top 110k DNS brute-force checkbox');
 assert.match(src, /Use bug-bounty-program-subdomains-trickest-inventory\.txt/, 'scan settings include Trickest DNS brute-force checkbox');
+assert.match(src, /use_cached_subdomains: true/, 'subdomain cache is enabled by default');
+assert.match(src, /refresh_passive_subdomains: true/, 'passive refresh remains enabled by default');
+assert.match(src, /fresh_subdomain_scan: false/, 'fresh-only scans are disabled by default');
+assert.match(src, /Use saved subdomains for this target/, 'scan settings include saved subdomain cache checkbox');
+assert.match(src, /Refresh passive sources now/, 'scan settings include passive refresh checkbox');
+assert.match(src, /Fresh scan only, ignore saved subdomains/, 'scan settings include fresh-only checkbox');
+assert.match(src, /Clear subdomain cache for this target/, 'scan settings include clear subdomain cache action');
 
 console.log('frontend log viewer static tests passed');
