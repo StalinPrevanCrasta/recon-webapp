@@ -45,6 +45,7 @@ class RunScanRequest(BaseModel):
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
     katana_crawl_duration: str = "2m"
     run_arjun: bool = True
+    arjun_only: bool = False
     arjun_methods: str = "GET"
     arjun_timeout: int = Field(default=240, ge=30, le=3600)
     arjun_threads: int = Field(default=5, ge=1, le=20)
@@ -89,6 +90,7 @@ class StageRerunRequest(BaseModel):
     parameter_timeout: int = 240
     katana_crawl_duration: str = "2m"
     run_arjun: bool = True
+    arjun_only: bool = False
     arjun_methods: str = "GET"
     arjun_timeout: int = 240
     arjun_threads: int = 5

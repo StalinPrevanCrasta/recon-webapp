@@ -232,6 +232,42 @@ def test_fresh_subdomain_scan_limits_downstream_to_current_scan(monkeypatch, tmp
         db.close()
 
 
+def test_run_parameters_arjun_only_uses_selected_urls(monkeypatch, tmp_path):
+    db, target, scan = make_scan({
+        "arjun_only": True,
+        "run_arjun": True,
+        "subset_urls": ["https://api.example.test/search", "https://app.example.test/login"],
+        "arjun_methods": "GET",
+    })
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    arjun_inputs = []
+
+    def fake_run_command(cmd, timeout=None):
+        if cmd[0] != "arjun":
+            raise AssertionError(f"only arjun should run, got {cmd}")
+        infile = Path(cmd[cmd.index("-i") + 1])
+        arjun_inputs.append(infile.read_text(encoding="utf-8").splitlines())
+        outfile = Path(cmd[cmd.index("-oJ") + 1])
+        outfile.parent.mkdir(parents=True, exist_ok=True)
+        outfile.write_text('{"https://api.example.test/search":{"method":"GET","params":["redirect_url","user_id"]}}', encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_parameters(db, scan, scan.config["subset_urls"])
+        assert arjun_inputs == [["https://api.example.test/search", "https://app.example.test/login"]]
+        assert stats["parameters"] == 2
+        rows = db.query(models.ParameterResult).filter_by(scan_id=scan.id).order_by(models.ParameterResult.param).all()
+        assert [r.param for r in rows] == ["redirect_url", "user_id"]
+        assert all(r.source == "arjun-get" for r in rows)
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="parameters").all()}
+        assert "arjun-selected-urls" in raw_tools
+        assert "gau" not in raw_tools
+        assert "katana" not in raw_tools
+    finally:
+        db.close()
+
+
 def test_httpx_checks_root_domain_when_no_subdomains_discovered(monkeypatch, tmp_path):
     db, target, scan = make_scan()
     db.add(models.Subdomain(target_id=target.id, scan_id=scan.id, first_seen_scan_id=scan.id, name=target.domain, sources=["root"], depths=[0]))

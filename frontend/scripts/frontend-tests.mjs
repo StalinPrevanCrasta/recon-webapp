@@ -31,5 +31,9 @@ assert.match(src, /Refresh passive sources now/, 'scan settings include passive 
 assert.match(src, /Fresh scan only, ignore saved subdomains/, 'scan settings include fresh-only checkbox');
 assert.match(src, /Clear subdomain cache for this target/, 'scan settings include clear subdomain cache action');
 assert.match(src, /Use Subfinder recursive mode/, 'scan settings include optional Subfinder recursive toggle');
+assert.match(src, /Run Arjun on selected URLs/, 'Parameters tab includes manual selected-URL Arjun action');
+assert.match(src, /arjun_only: true/, 'manual Arjun action uses Arjun-only parameter rerun');
+assert.match(src, /source_url \|\| r\.base_url/, 'manual Arjun action uses parameter source URLs');
+assert.match(src, /r\.url \|\| r\.source_url \|\| r\.name/, 'copy selected includes parameter source URLs');
 
 console.log('frontend log viewer static tests passed');

@@ -847,52 +847,61 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
     endpoint_urls: set[str] = set()
     parameter_timeout = int(config.get("parameter_timeout", 240))
     katana_crawl_duration = str(config.get("katana_crawl_duration") or "2m")
-    gau_out = raw_path(scan.id, "parameters", "gau")
-    try:
-        stdout, stderr = _call_command(command, build_gau_command(domain), timeout=min(parameter_timeout, 120))
-    except CommandError as exc:
-        stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
-        raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
-    except Exception as exc:
-        stdout, stderr = "", str(exc)
-        raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
-    gau_out.write_text(stdout, encoding="utf-8")
-    if stderr:
-        raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
-    record_raw(db, scan.id, "parameters", "gau", gau_out)
-    raw_texts.append(("gau", stdout))
-    endpoint_urls.update(extract_endpoint_urls(stdout))
+    arjun_only = bool(config.get("arjun_only", False))
 
-    if live_urls:
-        katana_in = raw_path(scan.id, "parameters", "katana-input")
-        katana_out = raw_path(scan.id, "parameters", "katana")
-        katana_in.write_text("\n".join(live_urls), encoding="utf-8")
+    if arjun_only:
+        selected_urls = [url for url in (urls or config.get("subset_urls") or []) if url]
+        endpoint_urls.update(selected_urls)
+        selected_out = raw_path(scan.id, "parameters", "arjun-selected-urls")
+        selected_out.write_text("\n".join(sorted(endpoint_urls)), encoding="utf-8")
+        record_raw(db, scan.id, "parameters", "arjun-selected-urls", selected_out)
+    else:
+        gau_out = raw_path(scan.id, "parameters", "gau")
         try:
-            _call_command(
-                command,
-                build_katana_command(
-                    katana_in,
-                    katana_out,
-                    int(config.get("katana_depth", 2)),
-                    bool(config.get("run_katana_headless", False)),
-                    katana_crawl_duration,
-                ),
-                timeout=parameter_timeout,
-            )
+            stdout, stderr = _call_command(command, build_gau_command(domain), timeout=min(parameter_timeout, 120))
         except CommandError as exc:
-            if not katana_out.exists():
-                katana_out.write_text(exc.stdout or "", encoding="utf-8")
-            raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
+            stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
+            raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
         except Exception as exc:
+            stdout, stderr = "", str(exc)
+            raw_path(scan.id, "parameters", "gau-note").write_text(str(exc), encoding="utf-8")
+        gau_out.write_text(stdout, encoding="utf-8")
+        if stderr:
+            raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
+        record_raw(db, scan.id, "parameters", "gau", gau_out)
+        raw_texts.append(("gau", stdout))
+        endpoint_urls.update(extract_endpoint_urls(stdout))
+
+        if live_urls:
+            katana_in = raw_path(scan.id, "parameters", "katana-input")
+            katana_out = raw_path(scan.id, "parameters", "katana")
+            katana_in.write_text("\n".join(live_urls), encoding="utf-8")
+            try:
+                _call_command(
+                    command,
+                    build_katana_command(
+                        katana_in,
+                        katana_out,
+                        int(config.get("katana_depth", 2)),
+                        bool(config.get("run_katana_headless", False)),
+                        katana_crawl_duration,
+                    ),
+                    timeout=parameter_timeout,
+                )
+            except CommandError as exc:
+                if not katana_out.exists():
+                    katana_out.write_text(exc.stdout or "", encoding="utf-8")
+                raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
+            except Exception as exc:
+                if not katana_out.exists():
+                    katana_out.write_text("", encoding="utf-8")
+                raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
             if not katana_out.exists():
                 katana_out.write_text("", encoding="utf-8")
-            raw_path(scan.id, "parameters", "katana-note").write_text(str(exc), encoding="utf-8")
-        if not katana_out.exists():
-            katana_out.write_text("", encoding="utf-8")
-        record_raw(db, scan.id, "parameters", "katana", katana_out)
-        katana_text = katana_out.read_text(errors="ignore")
-        raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_text))
-        endpoint_urls.update(extract_endpoint_urls(katana_text))
+            record_raw(db, scan.id, "parameters", "katana", katana_out)
+            katana_text = katana_out.read_text(errors="ignore")
+            raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_text))
+            endpoint_urls.update(extract_endpoint_urls(katana_text))
 
     if config.get("run_arjun", True) and endpoint_urls:
         arjun_in = raw_path(scan.id, "parameters", "arjun-input")
@@ -1012,7 +1021,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         elif scan.config:
             urls = scan.config.get("subset_urls")
 
-        if stage_only in (None, "wappalyzer", "ffuf", "parameters"):
+        if stage_only in (None, "wappalyzer", "ffuf", "parameters") and not (scan.config or {}).get("arjun_only", False):
             set_scan(db, scan, "wappalyzer", 58)
             run_wappalyzer(db, scan, urls)
 

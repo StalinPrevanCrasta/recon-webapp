@@ -308,7 +308,7 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
   const copy = value => navigator.clipboard?.writeText(value).catch(() => {});
   return <>
     <Filters filters={filters} setFilters={setFilters}/>
-    <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.name).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
+    <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.source_url || r.name).filter(Boolean).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
     <table><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
       const value = row.url || row.source_url || row.name;
       const tags = tagsFor(row);
@@ -556,6 +556,32 @@ function App() {
       setAlert(err.message || String(err));
     }
   }
+  async function runArjunOnSelectedParameters() {
+    const parentScanId = result?.active_scan?.id || scan?.id;
+    const urls = [...new Set(parameterRows.filter(r => selectedIds.has(r.id)).map(r => r.source_url || r.base_url).filter(Boolean))];
+    if (!parentScanId || !urls.length) return;
+    setAlert('');
+    try {
+      const payload = {
+        stage: 'parameters',
+        subset_urls: urls,
+        arjun_only: true,
+        run_arjun: true,
+        run_parameters: true,
+        arjun_methods: opts.arjun_methods || 'GET',
+        arjun_timeout: Number(opts.arjun_timeout) || 240,
+        arjun_threads: Number(opts.arjun_threads) || 5,
+        arjun_request_timeout: Number(opts.arjun_request_timeout) || 10,
+        arjun_stable: Boolean(opts.arjun_stable),
+      };
+      const res = await j(`${API}/scans/${parentScanId}/rerun`, {method: 'POST', body: JSON.stringify(payload)});
+      setScan({id: res.scan_id, status: 'queued', stage: 'queued:parameters'});
+      setSelectedIds(new Set());
+      await refresh(active?.id);
+    } catch (err) {
+      setAlert(err.message || String(err));
+    }
+  }
   async function upload(kind, file) { if (!file) return; setAlert(''); try { const fd = new FormData(); fd.append('file', file); await j(`${API}/wordlists/${kind}`, {method: 'POST', body: fd}); await refresh(); } catch (err) { setAlert(err.message || String(err)); } }
   async function saveSettings() { setAlert(''); try { const body = {...settings, headers: Object.fromEntries((settings.headerLines || '').split('\n').filter(Boolean).map(l => { const [k, ...v] = l.split(':'); return [k.trim(), v.join(':').trim()]; }))}; delete body.headerLines; setSettings(await j(`${API}/settings`, {method: 'PUT', body: JSON.stringify(body)})); } catch (err) { setAlert(err.message || String(err)); } }
   async function markInteresting(kind, row) { await j(`${API}/${kind}/${row.id}/interesting`, {method: 'PATCH', body: JSON.stringify({interesting: !row.interesting, note: row.note || '', tag: row.tag || ''})}); await refresh(); }
@@ -567,6 +593,7 @@ function App() {
   const subdomainRows = (result?.subdomains || []).map(s => ({...s, url: s.name}));
   const dirRows = result?.dirs || [];
   const parameterRows = result?.parameters || [];
+  const selectedParameterUrls = [...new Set(parameterRows.filter(r => selectedIds.has(r.id)).map(r => r.source_url || r.base_url).filter(Boolean))];
   const scanStatus = result?.active_scan || scan;
   const scanRunning = ['queued', 'running'].includes(scanStatus?.status);
   const defaultFfuf = health?.ffuf;
@@ -596,7 +623,7 @@ function App() {
       {tab === 'Subdomains' && <AssetTable rows={subdomainRows} kind="subdomains" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
       {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>}
       {tab === 'Content Paths' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
-      {tab === 'Parameters' && <AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
+      {tab === 'Parameters' && <><div className="bulkbar action-strip"><span>{selectedParameterUrls.length} selected URL{selectedParameterUrls.length === 1 ? '' : 's'} ready for Arjun</span><button className="primary" disabled={!selectedParameterUrls.length || scanRunning} onClick={runArjunOnSelectedParameters}>Run Arjun on selected URLs</button><span className="muted">Select parameter rows below; Arjun will probe their source URLs only.</span></div><AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>}
       {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>}
       {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>}
     </section></main>
