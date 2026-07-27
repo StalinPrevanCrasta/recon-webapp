@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.recon.wrappers import build_amass_command, build_arjun_command, build_gau_command, build_httpx_command, build_katana_command, build_ffuf_command, build_naabu_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_wappalyzer_json, extract_endpoint_urls, extract_parameters_from_urls, parse_arjun_json
+from app.recon.wrappers import build_amass_command, build_arjun_command, build_gau_command, build_httpx_command, build_katana_command, build_ffuf_command, build_naabu_command, build_nuclei_command, build_subfinder_command, build_wappalyzer_command, parse_httpx_jsonl, parse_ffuf_json, parse_naabu_jsonl, parse_nuclei_jsonl, parse_wappalyzer_json, extract_endpoint_urls, extract_parameters_from_urls, parse_arjun_json
 
 
 def test_httpx_command_threads_headers_proxy_and_json_input(tmp_path):
@@ -185,3 +185,48 @@ def test_parameter_discovery_commands_and_parser(tmp_path):
     assert [row["param"] for row in arjun_rows] == ["token", "page"]
     assert arjun_rows[0]["source"] == "arjun-get"
     assert arjun_rows[0]["suspicious"] is True
+
+
+def test_nuclei_command_uses_medium_to_critical_unsafe_jsonl(tmp_path):
+    infile = tmp_path / "urls.txt"
+    outfile = tmp_path / "nuclei.jsonl"
+    templates = tmp_path / "templates"
+    cmd = build_nuclei_command(infile, outfile, concurrency=7, rate_limit=11, timeout=6, retries=1, unsafe=True, templates_path=templates)
+
+    assert cmd[:3] == ["nuclei", "-l", str(infile)]
+    assert "-jsonl" in cmd
+    assert ["-severity", "medium,high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
+    assert ["-c", "7"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
+    assert ["-rl", "11"] == cmd[cmd.index("-rl"):cmd.index("-rl") + 2]
+    assert ["-t", str(templates)] == cmd[cmd.index("-t"):cmd.index("-t") + 2]
+    assert "-unsafe" in cmd
+    assert ["-o", str(outfile)] == cmd[cmd.index("-o"):cmd.index("-o") + 2]
+
+
+def test_parse_nuclei_jsonl_extracts_vulnerability_fields():
+    text = '{"template-id":"exposed-git-config","info":{"name":"Git Config Exposure","severity":"high","description":"config leak","reference":["https://example.com"],"tags":"exposure,git"},"matched-at":"https://a.example/.git/config","host":"https://a.example","ip":"1.2.3.4","matcher-name":"word","type":"http","extracted-results":["repo = test"]}\n'
+
+    assert parse_nuclei_jsonl(text) == [{
+        "template_id": "exposed-git-config",
+        "template_name": "Git Config Exposure",
+        "severity": "high",
+        "matched_at": "https://a.example/.git/config",
+        "host": "https://a.example",
+        "ip": "1.2.3.4",
+        "matcher_name": "word",
+        "type": "http",
+        "description": "config leak",
+        "extracted_results": ["repo = test"],
+        "references": ["https://example.com"],
+        "tags": ["exposure", "git"],
+        "raw": {
+            "template-id": "exposed-git-config",
+            "info": {"name": "Git Config Exposure", "severity": "high", "description": "config leak", "reference": ["https://example.com"], "tags": "exposure,git"},
+            "matched-at": "https://a.example/.git/config",
+            "host": "https://a.example",
+            "ip": "1.2.3.4",
+            "matcher-name": "word",
+            "type": "http",
+            "extracted-results": ["repo = test"],
+        },
+    }]

@@ -189,6 +189,7 @@ def delete_target(target_id: int, db: Session = Depends(get_db)):
         "dirs": db.query(models.DirbResult).filter_by(target_id=target_id).delete(synchronize_session=False),
         "parameters": db.query(models.ParameterResult).filter_by(target_id=target_id).delete(synchronize_session=False),
         "js": db.query(models.JsFinding).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "nuclei": db.query(models.NucleiFinding).filter_by(target_id=target_id).delete(synchronize_session=False),
         "screenshots": db.query(models.Screenshot).filter_by(target_id=target_id).delete(synchronize_session=False),
         "raw": 0,
     }
@@ -211,7 +212,7 @@ def clear_subdomain_cache(target_id: int, db: Session = Depends(get_db)):
 
 
 
-def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list, dirs: list, parameters: list, arjun: list, js_findings: list, screenshots: list, raw: list) -> dict:
+def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list, dirs: list, parameters: list, arjun: list, js_findings: list, nuclei_findings: list, screenshots: list, raw: list) -> dict:
     raw_by_stage = {}
     for r in raw:
         raw_by_stage.setdefault(r.stage, []).append(r)
@@ -236,6 +237,7 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
         "wappalyzer": {"status": stage_state("wappalyzer", len([h for h in http if h.get("tech")])), "results": len([h for h in http if h.get("tech")]), "total": len(http)},
         "js_intel": {"status": stage_state("js_intel", len(js_findings)), "results": len(js_findings), "high": len([j for j in js_findings if j.get("severity") == "high"])},
         "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status in {"running", "stopping"} else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": len(ffuf_success), "failed_hosts": len(ffuf_errors), "total": len(http)},
+        "nuclei": {"status": stage_state("nuclei", len(nuclei_findings)), "results": len(nuclei_findings), "high": len([n for n in nuclei_findings if n.get("severity") == "high"]), "critical": len([n for n in nuclei_findings if n.get("severity") == "critical"])},
         "parameters": {"status": stage_state("parameters", len(parameters)), "results": len(parameters), "suspicious": len([p for p in parameters if p.get("suspicious")])},
         "arjun": {"status": stage_state("arjun", len(arjun)), "results": len(arjun), "suspicious": len([p for p in arjun if p.get("suspicious")])},
         "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots)},
@@ -249,7 +251,7 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     scans_q = db.query(models.Scan).filter_by(target_id=target_id).order_by(models.Scan.id.desc())
     scan = db.get(models.Scan, scan_id) if scan_id else scans_q.first()
     if not scan:
-        return {"target": {"id": target.id, "domain": target.domain}, "scans": [], "subdomains": [], "http": [], "dirs": [], "parameters": [], "arjun": [], "js_findings": [], "screenshots": [], "raw": []}
+        return {"target": {"id": target.id, "domain": target.domain}, "scans": [], "subdomains": [], "http": [], "dirs": [], "parameters": [], "arjun": [], "js_findings": [], "nuclei_findings": [], "screenshots": [], "raw": []}
     prev = db.query(models.Scan).filter(models.Scan.target_id == target_id, models.Scan.id < scan.id).order_by(models.Scan.id.desc()).first()
     def rowdict(row, keys):
         d = {k: getattr(row, k) for k in keys}; d["first_seen_scan_id"] = getattr(row, "first_seen_scan_id", None); d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id; return d
@@ -264,6 +266,7 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     parameters = [r for r in parameter_rows if not str(r.get("source") or "").startswith("arjun-")]
     arjun = [r for r in parameter_rows if str(r.get("source") or "").startswith("arjun-")]
     js_findings = [rowdict(r, ["id", "page_url", "source_url", "file_path", "finding_type", "severity", "indicator", "evidence", "line", "column", "confidence", "tags", "interesting", "note"]) for r in db.query(models.JsFinding).filter_by(scan_id=scan.id).all()]
+    nuclei_findings = [rowdict(r, ["id", "template_id", "template_name", "severity", "matched_at", "host", "ip", "matcher_name", "type", "description", "extracted_results", "references", "tags", "raw", "interesting", "note"]) for r in db.query(models.NucleiFinding).filter_by(scan_id=scan.id).all()]
     screenshots = [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()]
     raw_rows = db.query(models.RawOutput).filter_by(scan_id=scan.id).all()
     raw = [{"id": r.id, "stage": r.stage, "tool": r.tool, "path": r.path} for r in raw_rows]
@@ -271,7 +274,7 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         "target": {"id": target.id, "domain": target.domain},
         "scans": [{"id": s.id, "status": s.status, "stage": s.stage, "progress": s.progress, "created_at": s.created_at} for s in scans_q.all()],
         "active_scan": {"id": scan.id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error},
-        "stage_statuses": stage_statuses(db, scan, subdomains, http, dirs, parameters, arjun, js_findings, screenshots, raw_rows),
+        "stage_statuses": stage_statuses(db, scan, subdomains, http, dirs, parameters, arjun, js_findings, nuclei_findings, screenshots, raw_rows),
         "subdomains": subdomains,
         "ports": ports,
         "http": http,
@@ -279,6 +282,7 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         "parameters": parameters,
         "arjun": arjun,
         "js_findings": js_findings,
+        "nuclei_findings": nuclei_findings,
         "screenshots": screenshots,
         "raw": raw,
     }
@@ -295,7 +299,7 @@ def raw_output(raw_id: int, db: Session = Depends(get_db)):
     content = path.read_text(errors="replace")
     return {"id": row.id, "stage": row.stage, "tool": row.tool, "path": row.path, "content": content[:200000], "truncated": len(content) > 200000}
 
-MODEL_MAP = {"subdomains": models.Subdomain, "http": models.HttpxResult, "dirs": models.DirbResult, "parameters": models.ParameterResult, "arjun": models.ParameterResult, "js_findings": models.JsFinding, "screenshots": models.Screenshot}
+MODEL_MAP = {"subdomains": models.Subdomain, "http": models.HttpxResult, "dirs": models.DirbResult, "parameters": models.ParameterResult, "arjun": models.ParameterResult, "js_findings": models.JsFinding, "nuclei_findings": models.NucleiFinding, "screenshots": models.Screenshot}
 @app.patch("/api/{kind}/{item_id}/interesting")
 def mark_interesting(kind: str, item_id: int, patch: InterestingPatch, db: Session = Depends(get_db)):
     model = MODEL_MAP.get(kind)
@@ -325,5 +329,6 @@ def export(target_id: int, format: str = "json", db: Session = Depends(get_db)):
         for p in data["parameters"]: writer.writerow(["parameter", p["source_url"], p["method"], f"{p['param']} {p.get('reason') or ''}".strip()])
         for p in data["arjun"]: writer.writerow(["arjun", p["source_url"], p["method"], f"{p['param']} {p.get('reason') or ''}".strip()])
         for j in data["js_findings"]: writer.writerow(["js_finding", j["source_url"], j["severity"], f"{j['finding_type']} {j['indicator']}".strip()])
+        for n in data["nuclei_findings"]: writer.writerow(["nuclei", n["matched_at"], n["severity"], f"{n['template_id']} {n.get('template_name') or ''}".strip()])
         return Response(buf.getvalue(), media_type="text/csv")
     raise HTTPException(400, "format must be json or csv")

@@ -48,6 +48,12 @@ class RunScanRequest(BaseModel):
     js_intel_timeout: int = Field(default=180, ge=30, le=1800)
     trufflehog_results: str = "verified,unknown,unverified"
     trufflehog_concurrency: int = Field(default=4, ge=1, le=32)
+    nuclei_concurrency: int = Field(default=20, ge=1, le=100)
+    nuclei_rate_limit: int = Field(default=30, ge=1, le=500)
+    nuclei_timeout: int = Field(default=5, ge=1, le=60)
+    nuclei_retries: int = Field(default=1, ge=0, le=5)
+    nuclei_stage_timeout: int = Field(default=1800, ge=30, le=7200)
+    nuclei_max_urls: int = Field(default=500, ge=1, le=10000)
     katana_depth: int = Field(default=2, ge=1, le=5)
     run_katana_headless: bool = False
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
@@ -101,6 +107,12 @@ class StageRerunRequest(BaseModel):
     js_intel_timeout: int = 180
     trufflehog_results: str = "verified,unknown,unverified"
     trufflehog_concurrency: int = 4
+    nuclei_concurrency: int = 20
+    nuclei_rate_limit: int = 30
+    nuclei_timeout: int = 5
+    nuclei_retries: int = 1
+    nuclei_stage_timeout: int = 1800
+    nuclei_max_urls: int = 500
     katana_depth: int = 2
     run_katana_headless: bool = False
     parameter_timeout: int = 240

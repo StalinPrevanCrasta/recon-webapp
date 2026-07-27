@@ -22,6 +22,7 @@ from app.recon.wrappers import (
     build_amass_command, build_arjun_command, build_ffuf_command, build_gau_command, build_gowitness_command, build_httpx_command, build_katana_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
     parse_naabu_jsonl, build_wappalyzer_command, parse_wappalyzer_json, extract_endpoint_urls, extract_parameters_from_urls, parse_arjun_json,
+    build_nuclei_command, parse_nuclei_jsonl,
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
@@ -36,6 +37,7 @@ SCAN_FFUF_PARALLEL = int(os.getenv("SCAN_FFUF_PARALLEL", "2"))
 SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "500"))
 FFUF_RESULT_BATCH_SIZE = int(os.getenv("FFUF_RESULT_BATCH_SIZE", "50"))
 JS_INTEL_BATCH_SIZE = int(os.getenv("JS_INTEL_BATCH_SIZE", "50"))
+NUCLEI_RESULT_BATCH_SIZE = int(os.getenv("NUCLEI_RESULT_BATCH_SIZE", "50"))
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 RAW_DIR = DATA_DIR / "raw"
@@ -1085,6 +1087,131 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
     return stats
 
 
+def _nuclei_input_urls(db: Session, scan: models.Scan, urls: list[str] | None = None) -> list[str]:
+    config = scan.config or {}
+    max_urls = int(config.get("nuclei_max_urls", 500))
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str | None) -> None:
+        if not value:
+            return
+        normalized = str(value).strip()
+        if not normalized or normalized in seen:
+            return
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return
+        seen.add(normalized)
+        ordered.append(normalized)
+
+    if urls:
+        for url in urls:
+            add(url)
+
+    http_query = db.query(models.HttpxResult.url).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
+    for row in http_query.order_by(models.HttpxResult.status_code.asc()).all():
+        add(row.url)
+
+    dir_query = db.query(models.DirbResult.url).filter(
+        models.DirbResult.scan_id == scan.id,
+        models.DirbResult.confidence.in_(["confirmed", "possible"]),
+    )
+    for row in dir_query.order_by(models.DirbResult.status_code.asc()).all():
+        add(row.url)
+        if len(ordered) >= max_urls:
+            break
+
+    return ordered[:max_urls]
+
+
+def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
+    config = scan.config or {}
+    input_urls = _nuclei_input_urls(db, scan, urls)
+    infile = raw_path(scan.id, "nuclei", "input")
+    outfile = raw_path(scan.id, "nuclei", "nuclei", "jsonl")
+    infile.write_text("\n".join(input_urls), encoding="utf-8")
+    stats = {"input_urls": len(input_urls), "findings": 0, "medium": 0, "high": 0, "critical": 0}
+    if not input_urls:
+        outfile.write_text("", encoding="utf-8")
+        record_raw(db, scan.id, "nuclei", "nuclei-input", infile)
+        record_raw(db, scan.id, "nuclei", "nuclei", outfile)
+        return stats
+
+    command = _command_for_scan(scan.id)
+    cmd = build_nuclei_command(
+        infile,
+        outfile,
+        "medium,high,critical",
+        int(config.get("nuclei_concurrency", 20)),
+        int(config.get("nuclei_rate_limit", 30)),
+        int(config.get("nuclei_timeout", 5)),
+        int(config.get("nuclei_retries", 1)),
+        True,
+        Path(os.getenv("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")) if Path(os.getenv("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")).exists() else None,
+    )
+    try:
+        stdout, stderr = _call_command(command, cmd, timeout=int(config.get("nuclei_stage_timeout", 1800)))
+    except CommandError as exc:
+        stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
+        if stdout and not outfile.exists():
+            outfile.write_text(stdout, encoding="utf-8")
+        err = raw_path(scan.id, "nuclei", "nuclei-error")
+        err.write_text(stderr or str(exc), encoding="utf-8")
+        record_raw(db, scan.id, "nuclei", "nuclei-input", infile)
+        record_raw(db, scan.id, "nuclei", "nuclei-error", err)
+        raise
+    except Exception as exc:
+        err = raw_path(scan.id, "nuclei", "nuclei-error")
+        err.write_text(str(exc), encoding="utf-8")
+        record_raw(db, scan.id, "nuclei", "nuclei-input", infile)
+        record_raw(db, scan.id, "nuclei", "nuclei-error", err)
+        raise
+
+    if stdout and not outfile.exists():
+        outfile.write_text(stdout, encoding="utf-8")
+    if not outfile.exists():
+        outfile.write_text("", encoding="utf-8")
+    if stderr:
+        stderr_out = raw_path(scan.id, "nuclei", "nuclei-stderr")
+        stderr_out.write_text(stderr, encoding="utf-8")
+        record_raw(db, scan.id, "nuclei", "nuclei-stderr", stderr_out)
+    record_raw(db, scan.id, "nuclei", "nuclei-input", infile)
+    record_raw(db, scan.id, "nuclei", "nuclei", outfile)
+
+    findings = [
+        item for item in parse_nuclei_jsonl(outfile.read_text(errors="ignore"))
+        if item.get("severity") in {"medium", "high", "critical"}
+    ]
+    existing = {
+        (r.template_id, r.matched_at)
+        for r in db.query(models.NucleiFinding.template_id, models.NucleiFinding.matched_at).filter_by(scan_id=scan.id).all()
+    }
+    prior_cache: dict[tuple[str, str], int] = {}
+    pending: list[models.NucleiFinding] = []
+    for item in findings:
+        key = (item["template_id"], item["matched_at"])
+        if key in existing:
+            continue
+        existing.add(key)
+        if key not in prior_cache:
+            prior = db.query(models.NucleiFinding).filter_by(target_id=scan.target_id, template_id=item["template_id"], matched_at=item["matched_at"]).order_by(models.NucleiFinding.id.asc()).first()
+            prior_cache[key] = prior.first_seen_scan_id if prior else scan.id
+        severity = item["severity"]
+        if severity in stats:
+            stats[severity] += 1
+        stats["findings"] += 1
+        pending.append(models.NucleiFinding(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_cache[key], **item))
+        if len(pending) >= NUCLEI_RESULT_BATCH_SIZE:
+            db.add_all(pending)
+            db.commit()
+            pending = []
+    if pending:
+        db.add_all(pending)
+        db.commit()
+    return stats
+
+
 def _ffuf_host(context: FfufHostContext, command: Callable) -> FfufHostResult:
     safe_url = re.sub(r"[^a-zA-Z0-9_.-]", "_", context.url)
     out = raw_path(context.scan_id, "ffuf", safe_url, "json")
@@ -1433,7 +1560,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         elif scan.config:
             urls = scan.config.get("subset_urls")
 
-        if stage_only in (None, "wappalyzer", "ffuf", "parameters", "js_intel"):
+        if stage_only in (None, "wappalyzer", "ffuf", "parameters", "js_intel", "nuclei"):
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "wappalyzer", 58)
             run_wappalyzer(db, scan, urls)
@@ -1449,6 +1576,12 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "ffuf", 70)
             ffuf_stats = run_ffuf(db, scan, urls)
+            ensure_scan_not_stopped(db, scan)
+
+        if stage_only in (None, "nuclei"):
+            ensure_scan_not_stopped(db, scan)
+            set_scan(db, scan, "nuclei", 76)
+            run_nuclei(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_parameters", True) and stage_only in (None, "parameters", "ffuf"):

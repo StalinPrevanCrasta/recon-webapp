@@ -482,6 +482,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: events.append("wappalyzer") or {})
     monkeypatch.setattr(pipeline, "run_js_intel", lambda db, scan, urls=None: events.append("js_intel") or {})
     monkeypatch.setattr(pipeline, "run_ffuf", lambda db, scan, urls=None: events.append("ffuf") or {"successful_hosts": 0, "failed_hosts": 1, "errors": [{"url": "https://a.example", "error": "timeout"}]})
+    monkeypatch.setattr(pipeline, "run_nuclei", lambda db, scan, urls=None: events.append("nuclei") or {})
     monkeypatch.setattr(pipeline, "run_parameters", lambda db, scan, urls=None: events.append("parameters") or {})
     monkeypatch.setattr(pipeline, "run_screenshots", lambda db, scan: events.append("screenshots"))
 
@@ -489,7 +490,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     try:
         pipeline.execute_scan(db, scan_id)
         row = db.get(models.Scan, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "ffuf", "parameters", "screenshots"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "ffuf", "nuclei", "parameters", "screenshots"]
         assert row.status == "partial"
         assert row.stage == "partial"
         assert "FFUF had 1 host failure" in row.error
@@ -507,12 +508,13 @@ def test_execute_scan_always_runs_wappalyzer_after_httpx(monkeypatch):
     monkeypatch.setattr(pipeline, "run_httpx", lambda db, scan: events.append("httpx") or ["https://a.example"])
     monkeypatch.setattr(pipeline, "run_wappalyzer", lambda db, scan, urls=None: events.append("wappalyzer") or {})
     monkeypatch.setattr(pipeline, "run_js_intel", lambda db, scan, urls=None: events.append("js_intel") or {})
+    monkeypatch.setattr(pipeline, "run_nuclei", lambda db, scan, urls=None: events.append("nuclei") or {})
     monkeypatch.setattr(pipeline, "run_parameters", lambda db, scan, urls=None: events.append("parameters") or {})
 
     db = SessionLocal()
     try:
         pipeline.execute_scan(db, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "parameters"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "nuclei", "parameters"]
     finally:
         db.close()
 
@@ -583,5 +585,45 @@ def test_run_js_intel_runs_trufflehog_on_downloaded_bundles(monkeypatch, tmp_pat
         raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="js_intel").all()}
         assert "trufflehog" in raw_tools
         assert "js-intel-manifest" in raw_tools
+    finally:
+        db.close()
+
+
+def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"nuclei_concurrency": 9, "nuclei_rate_limit": 17, "nuclei_timeout": 4, "nuclei_max_urls": 10})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://app.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/.git/config", normalized_path="/.git/config", method="GET", status_code=200, confidence="confirmed", headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/noise", normalized_path="/noise", method="GET", status_code=404, confidence="filtered", headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    calls = []
+
+    def fake_run_command(cmd, timeout=None):
+        calls.append(cmd)
+        infile = Path(cmd[cmd.index("-l") + 1])
+        assert infile.read_text(encoding="utf-8").splitlines() == ["https://app.example", "https://app.example/.git/config"]
+        assert "--unsafe" not in cmd
+        assert "-unsafe" in cmd
+        assert ["-severity", "medium,high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
+        assert ["-c", "9"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
+        assert ["-rl", "17"] == cmd[cmd.index("-rl"):cmd.index("-rl") + 2]
+        outfile = Path(cmd[cmd.index("-o") + 1])
+        outfile.parent.mkdir(parents=True, exist_ok=True)
+        outfile.write_text('{"template-id":"exposed-git-config","info":{"name":"Git Config","severity":"high","tags":"git,exposure"},"matched-at":"https://app.example/.git/config","host":"https://app.example","type":"http"}\n', encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_nuclei(db, scan)
+        assert stats["input_urls"] == 2
+        assert stats["findings"] == 1
+        assert stats["high"] == 1
+        row = db.query(models.NucleiFinding).filter_by(scan_id=scan.id).one()
+        assert row.template_id == "exposed-git-config"
+        assert row.severity == "high"
+        assert row.matched_at == "https://app.example/.git/config"
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="nuclei").all()}
+        assert {"nuclei-input", "nuclei"}.issubset(raw_tools)
+        assert calls
     finally:
         db.close()

@@ -61,7 +61,7 @@ def test_delete_target_removes_target_scans_and_results():
     response = client.delete(f"/api/targets/{target_id}")
 
     assert response.status_code == 200
-    assert response.json()["deleted"] == {"targets": 1, "scans": 1, "subdomains": 1, "ports": 1, "http": 1, "dirs": 1, "parameters": 1, "js": 1, "screenshots": 1, "raw": 1}
+    assert response.json()["deleted"] == {"targets": 1, "scans": 1, "subdomains": 1, "ports": 1, "http": 1, "dirs": 1, "parameters": 1, "js": 1, "nuclei": 0, "screenshots": 1, "raw": 1}
     assert client.get(f"/api/targets/{target_id}/results").status_code == 404
     db = SessionLocal()
     try:

@@ -144,6 +144,43 @@ def _sqlite_add_missing_columns() -> None:
             conn.execute(text("CREATE INDEX ix_js_findings_indicator ON js_findings (indicator)"))
             conn.execute(text("CREATE INDEX ix_js_findings_confidence ON js_findings (confidence)"))
             conn.execute(text("CREATE INDEX ix_js_findings_first_seen_scan_id ON js_findings (first_seen_scan_id)"))
+        if "nuclei_findings" not in tables:
+            conn.execute(text("""
+                CREATE TABLE nuclei_findings (
+                    id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    scan_id INTEGER NOT NULL,
+                    template_id VARCHAR(512) NOT NULL,
+                    template_name TEXT,
+                    severity VARCHAR(32) NOT NULL,
+                    matched_at VARCHAR(2048) NOT NULL,
+                    host VARCHAR(512),
+                    ip VARCHAR(128),
+                    matcher_name VARCHAR(255),
+                    type VARCHAR(64),
+                    description TEXT,
+                    extracted_results JSON DEFAULT '[]' NOT NULL,
+                    references JSON DEFAULT '[]' NOT NULL,
+                    tags JSON DEFAULT '[]' NOT NULL,
+                    raw JSON DEFAULT '{}' NOT NULL,
+                    first_seen_scan_id INTEGER NOT NULL,
+                    interesting BOOLEAN DEFAULT 0 NOT NULL,
+                    note TEXT,
+                    PRIMARY KEY (id),
+                    FOREIGN KEY(target_id) REFERENCES targets (id),
+                    FOREIGN KEY(scan_id) REFERENCES scans (id),
+                    CONSTRAINT uq_scan_nuclei_template_match UNIQUE (scan_id, template_id, matched_at)
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_target_id ON nuclei_findings (target_id)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_scan_id ON nuclei_findings (scan_id)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_template_id ON nuclei_findings (template_id)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_severity ON nuclei_findings (severity)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_matched_at ON nuclei_findings (matched_at)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_host ON nuclei_findings (host)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_ip ON nuclei_findings (ip)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_type ON nuclei_findings (type)"))
+            conn.execute(text("CREATE INDEX ix_nuclei_findings_first_seen_scan_id ON nuclei_findings (first_seen_scan_id)"))
 
 
 def init_db() -> None:

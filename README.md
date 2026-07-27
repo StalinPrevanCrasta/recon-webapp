@@ -1,6 +1,6 @@
 # Bug Bounty Recon Webapp
 
-Self-hosted Dockerized recon dashboard for subdomain enumeration, live host probing, FFUF content discovery, screenshots, raw-output review, exports, and diffable scan history.
+Self-hosted Dockerized recon dashboard for subdomain enumeration, live host probing, FFUF content discovery, mandatory Nuclei vulnerability checks, screenshots, raw-output review, exports, and diffable scan history.
 
 The dashboard also includes an optional localhost-oriented **Live Container Logs** viewer at `/logs` for Docker Compose service logs.
 
@@ -107,7 +107,9 @@ Docker volumes/bind mounts persist data across restarts:
 
 ## Recon tools included in backend/worker image
 
-The backend image installs: `subfinder`, `amass`, `httpx`, `ffuf`, `gowitness`, `puredns`, `massdns`, and `shuffledns`.
+The worker image installs: `subfinder`, `amass`, `httpx`, `ffuf`, `gowitness`, `puredns`, `massdns`, `shuffledns`, `gau`, `katana`, `arjun`, `trufflehog`, and `nuclei`.
+
+Nuclei runs automatically on every full scan after FFUF using bundled ProjectDiscovery templates, unsafe mode, and `medium,high,critical` severities. It scans live hosts plus confirmed/possible FFUF content paths and stores findings in the Vulnerabilities tab.
 
 ## Default FFUF wordlist
 

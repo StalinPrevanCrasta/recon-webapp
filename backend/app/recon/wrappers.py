@@ -282,6 +282,78 @@ def build_arjun_command(
     return cmd
 
 
+def build_nuclei_command(
+    input_file: Path,
+    output_file: Path,
+    severity: str = "medium,high,critical",
+    concurrency: int = 20,
+    rate_limit: int = 30,
+    timeout: int = 5,
+    retries: int = 1,
+    unsafe: bool = True,
+    templates_path: Path | None = None,
+) -> list[str]:
+    cmd = [
+        "nuclei",
+        "-l", str(input_file),
+        "-jsonl",
+        "-severity", severity,
+        "-c", str(concurrency),
+        "-rl", str(rate_limit),
+        "-timeout", str(timeout),
+        "-retries", str(retries),
+        "-o", str(output_file),
+        "-disable-update-check",
+    ]
+    if templates_path:
+        cmd.extend(["-t", str(templates_path)])
+    if unsafe:
+        cmd.append("-unsafe")
+    return cmd
+
+
+def parse_nuclei_jsonl(text: str) -> list[dict]:
+    rows: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        info = item.get("info") if isinstance(item.get("info"), dict) else {}
+        references = info.get("reference") or info.get("references") or []
+        if isinstance(references, str):
+            references = [references]
+        extracted = item.get("extracted-results") or item.get("extracted_results") or []
+        if isinstance(extracted, str):
+            extracted = [extracted]
+        tags = info.get("tags") or item.get("tags") or []
+        if isinstance(tags, str):
+            tags = [part.strip() for part in tags.split(",") if part.strip()]
+        matched_at = item.get("matched-at") or item.get("matched_at") or item.get("url") or item.get("host")
+        template_id = item.get("template-id") or item.get("template_id") or item.get("template") or "unknown"
+        if not matched_at:
+            continue
+        rows.append({
+            "template_id": str(template_id),
+            "template_name": info.get("name"),
+            "severity": str(info.get("severity") or item.get("severity") or "info").lower(),
+            "matched_at": str(matched_at),
+            "host": item.get("host"),
+            "ip": item.get("ip"),
+            "matcher_name": item.get("matcher-name") or item.get("matcher_name"),
+            "type": item.get("type"),
+            "description": info.get("description"),
+            "extracted_results": [str(value) for value in extracted],
+            "references": [str(value) for value in references],
+            "tags": [str(value) for value in tags],
+            "raw": item,
+        })
+    return rows
+
+
 SUSPICIOUS_PARAMETER_PATTERNS = [
     ("redirect", re.compile(r"redirect|redir|return|returnurl|next|continue|callback|url|uri|dest|destination", re.I)),
     ("file/path", re.compile(r"(^|_)(file|path|page|template|folder|dir|download|upload|document|doc|include)($|_)", re.I)),

@@ -16,7 +16,9 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
     go install github.com/d3mondev/puredns/v2@v2.1.1 && \
     go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@v1.2.1 && \
     go install github.com/lc/gau/v2/cmd/gau@v2.2.4 && \
-    go install github.com/projectdiscovery/katana/cmd/katana@v1.6.1
+    go install github.com/projectdiscovery/katana/cmd/katana@v1.6.1 && \
+    go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+RUN git clone --depth 1 https://github.com/projectdiscovery/nuclei-templates.git /root/nuclei-templates
 ARG TRUFFLEHOG_VERSION=3.96.0
 RUN curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
     | tar -xz -C /usr/local/bin trufflehog && \

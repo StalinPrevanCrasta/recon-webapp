@@ -9,9 +9,10 @@ The app runs a repeatable recon workflow for a target domain:
 1. Enumerates subdomains with passive and active sources.
 2. Probes discovered hosts with `httpx`.
 3. Runs directory/content fuzzing with `ffuf`.
-4. Screenshots live hosts with `gowitness`.
-5. Stores results, raw output, screenshots, notes, and scan history.
-6. Lets you filter, review, export, and compare repeat scans.
+4. Runs mandatory Nuclei vulnerability checks for medium, high, and critical findings.
+5. Screenshots live hosts with `gowitness`.
+6. Stores results, raw output, screenshots, notes, and scan history.
+7. Lets you filter, review, export, and compare repeat scans.
 
 The app shells out to recon CLI tools inside Docker containers. You do not install recon tools manually on the host.
 
@@ -125,6 +126,7 @@ The progress panel shows the active stage:
 - `subdomains`
 - `httpx`
 - `ffuf`
+- `nuclei`
 - `screenshots`
 - `complete`
 - `failed`
@@ -233,7 +235,36 @@ Stored result fields include:
 
 The open-directory heuristic flags likely listings when page titles or response patterns look like directory indexes.
 
-### Stage 4: Screenshots
+### Stage 4: Vulnerabilities
+
+The app runs `nuclei` automatically after FFUF on:
+
+- live hosts from `httpx`
+- confirmed and possible content paths from `ffuf`
+
+Nuclei is mandatory for full scans and uses:
+
+```text
+severity: medium,high,critical
+unsafe mode: enabled
+```
+
+Stored result fields include:
+
+- template ID and name
+- severity
+- matched URL
+- host and IP where available
+- matcher/type metadata
+- description
+- extracted results
+- references and tags
+- raw JSONL evidence
+- first-seen scan marker
+
+Use the **Vulnerabilities** tab for fast bounty triage. High and critical rows should still be manually verified before reporting.
+
+### Stage 5: Screenshots
 
 The app screenshots notable live hosts with `gowitness`.
 
@@ -301,6 +332,7 @@ Supported stage values are:
 - `subdomains`
 - `httpx`
 - `ffuf`
+- `nuclei`
 - `screenshots`
 
 ## Exporting Results
@@ -353,6 +385,7 @@ Supported `kind` values:
 - `subdomains`
 - `http`
 - `dirs`
+- `nuclei_findings`
 - `screenshots`
 
 Notes and interesting flags are persisted in SQLite.
@@ -533,10 +566,10 @@ docker compose ps redis
 
 ### A Recon Tool Is Missing
 
-Check inside the backend container:
+Check inside the worker container:
 
 ```bash
-docker compose exec backend sh -c 'command -v subfinder amass httpx ffuf gowitness puredns shuffledns massdns'
+docker compose exec worker sh -c 'command -v subfinder amass httpx ffuf gowitness puredns shuffledns massdns nuclei'
 ```
 
 The intended `httpx` binary is:

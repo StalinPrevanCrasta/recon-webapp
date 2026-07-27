@@ -157,6 +157,29 @@ class JsFinding(Base):
     interesting: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text)
 
+class NucleiFinding(Base):
+    __tablename__ = "nuclei_findings"
+    __table_args__ = (UniqueConstraint("scan_id", "template_id", "matched_at", name="uq_scan_nuclei_template_match"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), index=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
+    template_id: Mapped[str] = mapped_column(String(512), index=True)
+    template_name: Mapped[str | None] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(32), index=True)
+    matched_at: Mapped[str] = mapped_column(String(2048), index=True)
+    host: Mapped[str | None] = mapped_column(String(512), index=True)
+    ip: Mapped[str | None] = mapped_column(String(128), index=True)
+    matcher_name: Mapped[str | None] = mapped_column(String(255))
+    type: Mapped[str | None] = mapped_column(String(64), index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    extracted_results: Mapped[list[str]] = mapped_column(JSON, default=list)
+    references: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict)
+    first_seen_scan_id: Mapped[int] = mapped_column(Integer, index=True)
+    interesting: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text)
+
 class RawOutput(Base):
     __tablename__ = "raw_outputs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
