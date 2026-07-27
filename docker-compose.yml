@@ -19,7 +19,7 @@ services:
     environment:
       PATH: /root/go/bin:/usr/local/go/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       RECON_DATA_DIR: /data
-      DEFAULT_FFUF_WORDLIST: /usr/share/seclists/Discovery/Web-Content/common.txt
+      DEFAULT_FFUF_WORDLIST: /app/wordlists/default/common.txt
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       ENABLE_DOCKER_LOG_VIEWER: ${ENABLE_DOCKER_LOG_VIEWER:-true}
@@ -52,15 +52,15 @@ services:
           path: ./backend/Dockerfile
     logging: *log-rotation
   worker:
-    image: recon-webapp-backend:latest
+    image: recon-webapp-worker:latest
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: worker.Dockerfile
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
     environment:
       PATH: /root/go/bin:/usr/local/go/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       RECON_DATA_DIR: /data
-      DEFAULT_FFUF_WORDLIST: /usr/share/seclists/Discovery/Web-Content/common.txt
+      DEFAULT_FFUF_WORDLIST: /app/wordlists/default/common.txt
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
     volumes:
@@ -81,7 +81,7 @@ services:
         - action: rebuild
           path: ./backend/requirements.txt
         - action: rebuild
-          path: ./backend/Dockerfile
+          path: ./backend/worker.Dockerfile
     logging: *log-rotation
   frontend:
     build:

@@ -46,6 +46,8 @@ class RunScanRequest(BaseModel):
     js_intel_max_scripts_per_host: int = Field(default=25, ge=1, le=200)
     js_intel_max_bytes: int = Field(default=2000000, ge=100000, le=10000000)
     js_intel_timeout: int = Field(default=180, ge=30, le=1800)
+    trufflehog_results: str = "verified,unknown,unverified"
+    trufflehog_concurrency: int = Field(default=4, ge=1, le=32)
     katana_depth: int = Field(default=2, ge=1, le=5)
     run_katana_headless: bool = False
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
@@ -97,6 +99,8 @@ class StageRerunRequest(BaseModel):
     js_intel_max_scripts_per_host: int = 25
     js_intel_max_bytes: int = 2000000
     js_intel_timeout: int = 180
+    trufflehog_results: str = "verified,unknown,unverified"
+    trufflehog_concurrency: int = 4
     katana_depth: int = 2
     run_katana_headless: bool = False
     parameter_timeout: int = 240

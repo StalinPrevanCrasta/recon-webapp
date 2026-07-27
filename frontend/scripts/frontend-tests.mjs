@@ -34,9 +34,11 @@ assert.match(src, /Clear subdomain cache for this target/, 'scan settings includ
 assert.match(src, /Use Subfinder recursive mode/, 'scan settings include optional Subfinder recursive toggle');
 assert.match(src, /Use crt\.sh certificate transparency/, 'scan settings include optional crt.sh toggle');
 assert.match(src, /'JS Intel'/, 'JS Intel has its own top-level page tab');
-assert.match(src, /run_js_intel: true/, 'JS Intel is enabled by default');
-assert.match(src, /Download and analyze JavaScript bundles/, 'scan settings include JS bundle analysis toggle');
-assert.match(src, /source→sink DOM XSS clues/, 'JS Intel settings explain source-sink detection');
+assert.match(src, /run_js_intel: true/, 'JS Intel remains present in default scan options');
+assert.match(src, /JavaScript \+ TruffleHog/, 'scan settings include mandatory JS bundle and TruffleHog scanning');
+assert.match(src, /Always on/, 'JS Intel is presented as always-on');
+assert.match(src, /trufflehog_results: 'verified,unknown,unverified'/, 'TruffleHog scans verified, unknown, and unverified results by default');
+assert.match(src, /source-sink|source→sink|source → sink/i, 'JS Intel settings explain source-sink detection');
 assert.match(src, /js_findings/, 'frontend consumes JS Intel findings from the API');
 assert.match(src, /'Arjun'/, 'Arjun has its own top-level page tab');
 assert.match(src, /\/scans\/\$\{parentScanId\}\/arjun/, 'manual Arjun action calls the dedicated Arjun endpoint');

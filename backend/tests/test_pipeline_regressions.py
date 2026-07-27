@@ -86,6 +86,7 @@ def test_gowitness_uses_current_chrome_flags_and_png_format(tmp_path):
 def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
     db, target, scan = make_scan({"run_screenshots": True})
     db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://a.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="http://careers-in.floatbot.ai:8080", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
     db.commit()
 
     monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
@@ -97,6 +98,7 @@ def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
         (outdir / "https_a.example.png").write_bytes(b"png")
         (outdir / "https_b.example.jpg").write_bytes(b"jpg")
         (outdir / "https_c.example.jpeg").write_bytes(b"jpeg")
+        (outdir / "http---careers-in.floatbot.ai-8080.png").write_bytes(b"png")
         return "", ""
 
     monkeypatch.setattr(pipeline, "run_command", fake_run_command)
@@ -104,10 +106,16 @@ def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
     try:
         pipeline.run_screenshots(db, scan)
         rows = db.query(models.Screenshot).filter_by(scan_id=scan.id).all()
-        assert len(rows) == 3
+        assert len(rows) == 4
         assert {Path(r.image_path).suffix for r in rows} == {".png", ".jpg", ".jpeg"}
+        assert db.query(models.Screenshot).filter_by(scan_id=scan.id, url="http://careers-in.floatbot.ai:8080").count() == 1
     finally:
         db.close()
+
+
+def test_decode_gowitness_stem_restores_scheme_and_port():
+    assert pipeline.decode_gowitness_stem("http---careers-in.floatbot.ai-8080") == "http://careers-in.floatbot.ai:8080"
+    assert pipeline.decode_gowitness_stem("https---academy.floatbot.ai-443") == "https://academy.floatbot.ai:443"
 
 
 def test_upsert_subdomain_deduplicates_pending_rows_before_commit():
@@ -523,3 +531,57 @@ def test_analyze_js_text_finds_endpoints_secrets_and_source_sink():
     assert ("endpoint", "/api/v1/users") in pairs
     assert ("secret", "Google API key") in pairs
     assert any(row["finding_type"] == "source-sink" and row["severity"] == "high" for row in findings)
+
+
+def test_parse_trufflehog_json_maps_files_to_js_findings():
+    output = '{"DetectorName":"Github","Verified":true,"Redacted":"ghp_…abcd","SourceMetadata":{"Data":{"Filesystem":{"file":"/tmp/app.js","line":12}}}}\n'
+    findings = pipeline.parse_trufflehog_json(output, {"/tmp/app.js": {"page_url": "https://app.example", "source_url": "https://app.example/app.js", "file_path": "/tmp/app.js"}})
+
+    assert findings == [{
+        "page_url": "https://app.example",
+        "source_url": "https://app.example/app.js",
+        "file_path": "/tmp/app.js",
+        "finding_type": "trufflehog-secret",
+        "severity": "high",
+        "indicator": "Github: ghp_…abcd",
+        "evidence": "ghp_…abcd",
+        "line": 12,
+        "column": None,
+        "confidence": "verified",
+        "tags": ["secret", "trufflehog", "verified"],
+    }]
+
+
+def test_run_js_intel_runs_trufflehog_on_downloaded_bundles(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"js_intel_max_hosts": 1, "js_intel_max_scripts_per_host": 2, "js_intel_timeout": 120, "trufflehog_concurrency": 3})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url=f"https://app.{target.domain}", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+    calls = []
+
+    def fake_fetch(url, settings, timeout, max_bytes):
+        if url.endswith("/app.js"):
+            return 'const api="/api/admin";', {"status_code": 200, "content_type": "application/javascript", "bytes": 22}
+        return '<script src="/app.js"></script>', {"status_code": 200, "content_type": "text/html", "bytes": 31}
+
+    def fake_command(cmd, timeout=None):
+        calls.append(cmd)
+        assert cmd[0:2] == ["trufflehog", "filesystem"]
+        assert "--json" in cmd
+        assert "--results=verified,unknown,unverified" in cmd
+        assert "--concurrency=3" in cmd
+        return '{"DetectorName":"TestSecret","Verified":true,"Redacted":"tok_…1234","SourceMetadata":{"Data":{"Filesystem":{"file":"' + str(tmp_path / "raw" / f"scan-{scan.id}" / "js_intel" / "x.js").replace("\\", "\\\\") + '","line":1}}}}\n', ""
+
+    monkeypatch.setattr(pipeline, "_fetch_text", fake_fetch)
+    monkeypatch.setattr(pipeline, "run_command", fake_command)
+    try:
+        stats = pipeline.run_js_intel(db, scan)
+        assert stats["bundles"] == 1
+        assert stats["trufflehog"] == 1
+        assert calls
+        assert db.query(models.JsFinding).filter_by(scan_id=scan.id, finding_type="trufflehog-secret").count() == 1
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="js_intel").all()}
+        assert "trufflehog" in raw_tools
+        assert "js-intel-manifest" in raw_tools
+    finally:
+        db.close()

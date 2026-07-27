@@ -861,6 +861,108 @@ def _fetch_text(url: str, settings, timeout: int, max_bytes: int) -> tuple[str, 
             return text, {"status_code": response.status_code, "content_type": response.headers.get("content-type"), "bytes": len(body)}
 
 
+def _safe_trufflehog_results(value: str | None) -> str:
+    allowed = {"verified", "unknown", "unverified", "filtered_unverified"}
+    selected = [item.strip().lower() for item in str(value or "").split(",") if item.strip()]
+    selected = [item for item in selected if item in allowed]
+    return ",".join(selected or ["verified", "unknown", "unverified"])
+
+
+def _trufflehog_source_metadata(item: dict) -> dict:
+    data = ((item.get("SourceMetadata") or {}).get("Data") or {})
+    for value in data.values():
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def parse_trufflehog_json(text: str, file_to_url: dict[str, dict]) -> list[dict]:
+    findings: list[dict] = []
+    objects: list[dict] = []
+    stripped = (text or "").strip()
+    if not stripped:
+        return findings
+    try:
+        parsed = json.loads(stripped)
+        objects = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed_line = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed_line, dict):
+                objects.append(parsed_line)
+    for item in objects:
+        metadata = _trufflehog_source_metadata(item)
+        file_path = metadata.get("file") or metadata.get("File") or item.get("SourceName") or ""
+        normalized_file = str(file_path).replace("\\", "/")
+        mapped = file_to_url.get(file_path) or file_to_url.get(normalized_file) or {}
+        detector = item.get("DetectorName") or item.get("DetectorType") or item.get("Detector") or "Secret"
+        verified = bool(item.get("Verified"))
+        verification_error = item.get("VerificationError")
+        raw_value = item.get("Raw") or item.get("RawV2") or item.get("Redacted") or detector
+        redacted = item.get("Redacted") or (f"{str(raw_value)[:4]}…{str(raw_value)[-4:]}" if len(str(raw_value)) > 12 else "redacted")
+        if verified:
+            severity = "high"
+            confidence = "verified"
+        elif verification_error:
+            severity = "medium"
+            confidence = "unknown"
+        else:
+            severity = "medium"
+            confidence = "unverified"
+        line = metadata.get("line") or metadata.get("Line") or item.get("Line")
+        try:
+            line = int(line) if line is not None else None
+        except (TypeError, ValueError):
+            line = None
+        findings.append({
+            "page_url": mapped.get("page_url"),
+            "source_url": mapped.get("source_url") or file_path or "trufflehog",
+            "file_path": mapped.get("file_path") or file_path or None,
+            "finding_type": "trufflehog-secret",
+            "severity": severity,
+            "indicator": f"{detector}: {redacted}"[:1024],
+            "evidence": str(redacted)[:260],
+            "line": line,
+            "column": None,
+            "confidence": confidence,
+            "tags": ["secret", "trufflehog", confidence],
+        })
+    return findings
+
+
+def gowitness_stem_candidates(url: str) -> set[str]:
+    trimmed = url.rstrip("/")
+    candidates = {trimmed, trimmed.replace("://", "_", 1)}
+    dashed = trimmed.replace("://", "---", 1)
+    candidates.add(dashed)
+    candidates.add(dashed.replace(":", "-").replace("/", "-"))
+    candidates.add(re.sub(r"[^A-Za-z0-9_.-]+", "-", dashed))
+    return {item for item in candidates if item}
+
+
+def decode_gowitness_stem(stem: str) -> str:
+    if "://" in stem:
+        return stem
+    if "_" in stem:
+        return stem.replace("_", "://", 1)
+    for scheme in ("https", "http"):
+        prefix = f"{scheme}---"
+        if stem.startswith(prefix):
+            rest = stem[len(prefix):]
+            if "-" in rest:
+                host_part, possible_port = rest.rsplit("-", 1)
+                if possible_port.isdigit():
+                    return f"{scheme}://{host_part}:{possible_port}"
+            return f"{scheme}://{rest}"
+    return stem
+
+
 def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
     config = scan.config or {}
     settings = load_settings()
@@ -869,12 +971,15 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
     max_bytes = int(config.get("js_intel_max_bytes", 2_000_000))
     timeout = int(config.get("js_intel_timeout", 180))
     per_request_timeout = max(5, min(20, timeout // max(1, max_hosts)))
+    trufflehog_results = _safe_trufflehog_results(config.get("trufflehog_results"))
+    trufflehog_concurrency = int(config.get("trufflehog_concurrency", 4))
     query = db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
     if urls:
         query = query.filter(models.HttpxResult.url.in_(urls))
     hosts = query.order_by(models.HttpxResult.status_code.asc()).limit(max_hosts).all()
-    manifest = {"hosts": len(hosts), "scripts": [], "errors": []}
-    stats = {"hosts": len(hosts), "bundles": 0, "findings": 0, "high": 0, "failed": False}
+    manifest = {"hosts": len(hosts), "scripts": [], "trufflehog": {}, "errors": []}
+    stats = {"hosts": len(hosts), "bundles": 0, "findings": 0, "high": 0, "trufflehog": 0, "failed": False}
+    file_to_url: dict[str, dict] = {}
     existing = {
         (r.source_url, r.finding_type, r.indicator)
         for r in db.query(models.JsFinding.source_url, models.JsFinding.finding_type, models.JsFinding.indicator).filter_by(scan_id=scan.id).all()
@@ -904,6 +1009,8 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
                 else:
                     text, script_meta = inline_text, {"status_code": meta["status_code"], "content_type": "inline-script", "bytes": len(inline_text)}
                 out.write_text(text, encoding="utf-8", errors="ignore")
+                file_to_url[str(out)] = {"page_url": host.url, "source_url": script_url, "file_path": str(out)}
+                file_to_url[str(out).replace("\\", "/")] = {"page_url": host.url, "source_url": script_url, "file_path": str(out)}
                 stats["bundles"] += 1
                 manifest["scripts"].append({"page_url": host.url, "source_url": script_url, "path": str(out), **script_meta})
                 for finding in analyze_js_text(text, script_url, host.url, scan.target.domain):
@@ -921,10 +1028,57 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
                         pending = []
             except Exception as exc:
                 manifest["errors"].append({"url": script_url, "error": str(exc)})
+    bundle_dir = RAW_DIR / f"scan-{scan.id}" / "js_intel"
+    trufflehog_out = raw_path(scan.id, "js_intel", "trufflehog", "jsonl")
+    trufflehog_err = ""
+    if stats["bundles"]:
+        ensure_scan_not_stopped(db, scan)
+        command = _command_for_scan(scan.id)
+        cmd = [
+            "trufflehog",
+            "filesystem",
+            str(bundle_dir),
+            "--json",
+            f"--results={trufflehog_results}",
+            f"--concurrency={max(1, min(32, trufflehog_concurrency))}",
+            "--no-update",
+        ]
+        try:
+            stdout, stderr = _call_command(command, cmd, timeout=timeout)
+        except CommandError as exc:
+            stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
+            stats["failed"] = True
+        except Exception as exc:
+            stdout, stderr = "", str(exc)
+            stats["failed"] = True
+        trufflehog_out.write_text(stdout or "", encoding="utf-8")
+        if stderr:
+            trufflehog_err = stderr
+            trufflehog_note = raw_path(scan.id, "js_intel", "trufflehog-error" if stats["failed"] else "trufflehog-stderr")
+            trufflehog_note.write_text(stderr, encoding="utf-8")
+            record_raw(db, scan.id, "js_intel", "trufflehog-error" if stats["failed"] else "trufflehog-stderr", trufflehog_note)
+        record_raw(db, scan.id, "js_intel", "trufflehog", trufflehog_out)
+        trufflehog_findings = parse_trufflehog_json(stdout or "", file_to_url)
+        stats["trufflehog"] = len(trufflehog_findings)
+        for finding in trufflehog_findings:
+            key = (finding["source_url"], finding["finding_type"], finding["indicator"])
+            if key in existing:
+                continue
+            existing.add(key)
+            if finding["severity"] == "high":
+                stats["high"] += 1
+            file_path = finding.pop("file_path", None)
+            pending.append(models.JsFinding(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=scan.id, file_path=file_path, **finding))
+            if len(pending) >= JS_INTEL_BATCH_SIZE:
+                db.add_all(pending)
+                db.commit()
+                stats["findings"] += len(pending)
+                pending = []
     if pending:
         db.add_all(pending)
         db.commit()
         stats["findings"] += len(pending)
+    manifest["trufflehog"] = {"results": trufflehog_results, "concurrency": trufflehog_concurrency, "findings": stats["trufflehog"], "error": trufflehog_err[:1000] if trufflehog_err else ""}
     manifest_out = raw_path(scan.id, "js_intel", "manifest", "json")
     manifest_out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     record_raw(db, scan.id, "js_intel", "js-intel-manifest", manifest_out)
@@ -1224,6 +1378,10 @@ def run_screenshots(db: Session, scan: models.Scan) -> None:
     infile = raw_path(scan.id, "screenshots", "input")
     outdir = SCREEN_DIR / f"scan-{scan.id}"
     outdir.mkdir(parents=True, exist_ok=True)
+    url_by_stem: dict[str, str] = {}
+    for url in urls:
+        for stem in gowitness_stem_candidates(url):
+            url_by_stem.setdefault(stem, url)
     infile.write_text("\n".join(urls))
     try:
         _call_command(command, build_gowitness_command(infile, outdir, settings.user_agent, settings.proxy), timeout=3600)
@@ -1233,9 +1391,13 @@ def run_screenshots(db: Session, scan: models.Scan) -> None:
         record_raw(db, scan.id, "screenshots", "gowitness-error", err)
         raise
     images = list(outdir.glob("*.png")) + list(outdir.glob("*.jpg")) + list(outdir.glob("*.jpeg"))
+    existing_urls = {r.url for r in db.query(models.Screenshot.url).filter_by(scan_id=scan.id).all()}
     for image in images:
-        stem = image.stem.replace("_", "://", 1) if "_" in image.stem else image.stem
-        db.add(models.Screenshot(target_id=scan.target_id, scan_id=scan.id, url=stem, image_path=str(image)))
+        url = url_by_stem.get(image.stem) or decode_gowitness_stem(image.stem)
+        if url in existing_urls:
+            continue
+        existing_urls.add(url)
+        db.add(models.Screenshot(target_id=scan.target_id, scan_id=scan.id, url=url, image_path=str(image)))
     db.commit()
 
 
@@ -1277,7 +1439,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             run_wappalyzer(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
-        if (scan.config or {}).get("run_js_intel", True) and stage_only in (None, "js_intel"):
+        if stage_only in (None, "js_intel"):
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "js_intel", 63)
             run_js_intel(db, scan, urls)
