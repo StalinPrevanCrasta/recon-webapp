@@ -107,9 +107,23 @@ Docker volumes/bind mounts persist data across restarts:
 
 ## Recon tools included in backend/worker image
 
-The worker image installs: `subfinder`, `amass`, `httpx`, `ffuf`, `gowitness`, `puredns`, `massdns`, `shuffledns`, `gau`, `katana`, `arjun`, `trufflehog`, and `nuclei`.
+The worker image installs: `subfinder`, `amass`, `httpx`, `ffuf`, `gowitness`, `puredns`, `gau`, `katana`, `arjun`, `trufflehog`, and `nuclei`.
 
-Nuclei runs automatically on every full scan after FFUF using bundled ProjectDiscovery templates, unsafe mode, and `medium,high,critical` severities. It scans live hosts plus confirmed/possible FFUF content paths and stores findings in the Vulnerabilities tab.
+The worker uses a multi-stage build: Go tools are compiled in a temporary `golang:1.26-bookworm` builder stage, then only the finished binaries are copied into the runtime image. The final worker image does not keep the Go compiler or build toolchain.
+
+Nuclei is pinned in the worker image with `NUCLEI_VERSION=v3.11.0` for reproducible builds. Change the build arg in `backend/worker.Dockerfile` only when you want to upgrade the engine.
+
+Nuclei runs automatically on every full scan after FFUF using ProjectDiscovery templates and `medium,high,critical` severities. It scans live hosts plus confirmed/possible FFUF content paths and stores findings in the Vulnerabilities tab.
+
+Nuclei progress is streamed to the worker Docker logs and to raw output as `nuclei-log`. The command includes `-stats -si 10`, so long scans should emit status roughly every 10 seconds after startup/template loading. The default Nuclei stage timeout is 15 minutes and can be overridden with `nuclei_stage_timeout` in scan config.
+
+Nuclei templates are stored in the named Docker volume `nuclei-templates` instead of being cloned into the image. The worker initializes the volume on first start, then reuses it across rebuilds so normal app-code rebuilds do not redownload templates.
+
+To update templates manually:
+
+```bash
+docker compose exec worker nuclei -ut -ud /root/nuclei-templates
+```
 
 ## Default FFUF wordlist
 

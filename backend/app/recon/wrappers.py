@@ -292,6 +292,7 @@ def build_nuclei_command(
     retries: int = 1,
     unsafe: bool = True,
     templates_path: Path | None = None,
+    stats_interval: int = 10,
 ) -> list[str]:
     cmd = [
         "nuclei",
@@ -303,12 +304,12 @@ def build_nuclei_command(
         "-timeout", str(timeout),
         "-retries", str(retries),
         "-o", str(output_file),
-        "-disable-update-check",
+        "-duc",
+        "-stats",
+        "-si", str(stats_interval),
     ]
     if templates_path:
         cmd.extend(["-t", str(templates_path)])
-    if unsafe:
-        cmd.append("-unsafe")
     return cmd
 
 

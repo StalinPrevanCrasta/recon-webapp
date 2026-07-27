@@ -1138,7 +1138,12 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
         record_raw(db, scan.id, "nuclei", "nuclei", outfile)
         return stats
 
-    command = _command_for_scan(scan.id)
+    runner: CommandRunner | None = None
+    if run_command is _run_command:
+        runner = CommandRunner(scan.id)
+        command = runner.run
+    else:
+        command = run_command
     cmd = build_nuclei_command(
         infile,
         outfile,
@@ -1148,16 +1153,29 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
         int(config.get("nuclei_timeout", 5)),
         int(config.get("nuclei_retries", 1)),
         True,
-        Path(os.getenv("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")) if Path(os.getenv("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")).exists() else None,
+        Path(os.getenv("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")),
+        int(config.get("nuclei_stats_interval", 10)),
     )
+    log_out = raw_path(scan.id, "nuclei", "nuclei-log")
+    log_out.write_text(f"Running: {' '.join(cmd)}\n", encoding="utf-8")
+    record_raw(db, scan.id, "nuclei", "nuclei-log", log_out)
+    stage_timeout = int(config.get("nuclei_stage_timeout", 900))
     try:
-        stdout, stderr = _call_command(command, cmd, timeout=int(config.get("nuclei_stage_timeout", 1800)))
+        if runner:
+            stdout, stderr = runner.run_stream(
+                cmd,
+                timeout=stage_timeout,
+                output_path=log_out,
+                log_prefix=f"[scan {scan.id} nuclei] ",
+            )
+        else:
+            stdout, stderr = _call_command(command, cmd, timeout=stage_timeout)
     except CommandError as exc:
         stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
         if stdout and not outfile.exists():
             outfile.write_text(stdout, encoding="utf-8")
         err = raw_path(scan.id, "nuclei", "nuclei-error")
-        err.write_text(stderr or str(exc), encoding="utf-8")
+        err.write_text("\n".join(part for part in [stderr, stdout, str(exc)] if part), encoding="utf-8")
         record_raw(db, scan.id, "nuclei", "nuclei-input", infile)
         record_raw(db, scan.id, "nuclei", "nuclei-error", err)
         raise

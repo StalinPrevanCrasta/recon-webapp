@@ -17,7 +17,7 @@ services:
       dockerfile: Dockerfile
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
-      PATH: /root/go/bin:/usr/local/go/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      PATH: /usr/local/bin:/opt/venv/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
       RECON_DATA_DIR: /data
       DEFAULT_FFUF_WORDLIST: /app/wordlists/default/common.txt
       NUCLEI_TEMPLATES_DIR: /root/nuclei-templates
@@ -59,7 +59,7 @@ services:
       dockerfile: worker.Dockerfile
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
     environment:
-      PATH: /root/go/bin:/usr/local/go/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      PATH: /usr/local/bin:/opt/venv/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
       RECON_DATA_DIR: /data
       DEFAULT_FFUF_WORDLIST: /app/wordlists/default/common.txt
       NUCLEI_TEMPLATES_DIR: /root/nuclei-templates
@@ -67,6 +67,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/1
     volumes:
       - recon-data:/data
+      - nuclei-templates:/root/nuclei-templates
       - ./wordlists:/data/wordlists
       - ./screenshots:/data/screenshots
       - ./raw-output:/data/raw
@@ -116,3 +117,4 @@ services:
 volumes:
   redis-data:
   recon-data:
+  nuclei-templates:

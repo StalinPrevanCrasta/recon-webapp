@@ -603,7 +603,10 @@ def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
         infile = Path(cmd[cmd.index("-l") + 1])
         assert infile.read_text(encoding="utf-8").splitlines() == ["https://app.example", "https://app.example/.git/config"]
         assert "--unsafe" not in cmd
-        assert "-unsafe" in cmd
+        assert "-unsafe" not in cmd
+        assert "-duc" in cmd
+        assert "-stats" in cmd
+        assert ["-si", "10"] == cmd[cmd.index("-si"):cmd.index("-si") + 2]
         assert ["-severity", "medium,high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
         assert ["-c", "9"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
         assert ["-rl", "17"] == cmd[cmd.index("-rl"):cmd.index("-rl") + 2]
@@ -623,7 +626,7 @@ def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
         assert row.severity == "high"
         assert row.matched_at == "https://app.example/.git/config"
         raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="nuclei").all()}
-        assert {"nuclei-input", "nuclei"}.issubset(raw_tools)
+        assert {"nuclei-input", "nuclei", "nuclei-log"}.issubset(raw_tools)
         assert calls
     finally:
         db.close()
