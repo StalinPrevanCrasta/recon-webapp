@@ -589,8 +589,8 @@ def test_run_js_intel_runs_trufflehog_on_downloaded_bundles(monkeypatch, tmp_pat
         db.close()
 
 
-def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
-    db, target, scan = make_scan({"nuclei_concurrency": 9, "nuclei_rate_limit": 17, "nuclei_timeout": 4, "nuclei_max_urls": 10, "nuclei_severity": "high,critical"})
+def test_run_nuclei_scans_live_hosts_and_confirmed_paths_when_enabled(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"nuclei_concurrency": 9, "nuclei_rate_limit": 17, "nuclei_timeout": 4, "nuclei_max_urls": 10, "nuclei_severity": "high,critical", "nuclei_include_content_paths": True})
     db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://app.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
     db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/.git/config", normalized_path="/.git/config", method="GET", status_code=200, confidence="confirmed", headers_sent={}, first_seen_scan_id=scan.id))
     db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/noise", normalized_path="/noise", method="GET", status_code=404, confidence="filtered", headers_sent={}, first_seen_scan_id=scan.id))
@@ -610,6 +610,9 @@ def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
         assert ["-severity", "high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
         assert ["-c", "9"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
         assert ["-rl", "17"] == cmd[cmd.index("-rl"):cmd.index("-rl") + 2]
+        assert ["-tags", "exposure,takeover"] == cmd[cmd.index("-tags"):cmd.index("-tags") + 2]
+        assert ["-type", "http"] == cmd[cmd.index("-type"):cmd.index("-type") + 2]
+        assert "-ni" in cmd
         outfile = Path(cmd[cmd.index("-o") + 1])
         outfile.parent.mkdir(parents=True, exist_ok=True)
         outfile.write_text('{"template-id":"exposed-git-config","info":{"name":"Git Config","severity":"high","tags":"git,exposure"},"matched-at":"https://app.example/.git/config","host":"https://app.example","type":"http"}\n', encoding="utf-8")
@@ -628,5 +631,49 @@ def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
         raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="nuclei").all()}
         assert {"nuclei-input", "nuclei", "nuclei-log"}.issubset(raw_tools)
         assert calls
+    finally:
+        db.close()
+
+
+def test_run_nuclei_light_mode_skips_content_paths_by_default(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"nuclei_max_urls": 10})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://app.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/.git/config", normalized_path="/.git/config", method="GET", status_code=200, confidence="confirmed", headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+
+    def fake_run_command(cmd, timeout=None):
+        infile = Path(cmd[cmd.index("-l") + 1])
+        assert infile.read_text(encoding="utf-8").splitlines() == ["https://app.example"]
+        Path(cmd[cmd.index("-o") + 1]).write_text("", encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_nuclei(db, scan)
+        assert stats["input_urls"] == 1
+    finally:
+        db.close()
+
+
+def test_run_nuclei_timeout_returns_partial_stats(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"nuclei_stage_timeout": 30})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://app.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+
+    def fake_run_command(cmd, timeout=None):
+        outfile = Path(cmd[cmd.index("-o") + 1])
+        outfile.parent.mkdir(parents=True, exist_ok=True)
+        outfile.write_text("", encoding="utf-8")
+        raise pipeline.CommandError(cmd, -1, "", "timed out")
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_nuclei(db, scan)
+        assert stats["timed_out"] is True
+        assert "stage timeout" in stats["error"]
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="nuclei").all()}
+        assert {"nuclei-input", "nuclei-error", "nuclei"}.issubset(raw_tools)
     finally:
         db.close()

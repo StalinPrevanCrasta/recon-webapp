@@ -202,7 +202,9 @@ def test_nuclei_command_uses_light_jsonl_defaults(tmp_path):
     assert "-duc" in cmd
     assert "-stats" in cmd
     assert ["-si", "10"] == cmd[cmd.index("-si"):cmd.index("-si") + 2]
-    assert ["-exclude-tags", "dos,fuzz,intrusive"] == cmd[cmd.index("-exclude-tags"):cmd.index("-exclude-tags") + 2]
+    assert ["-type", "http"] == cmd[cmd.index("-type"):cmd.index("-type") + 2]
+    assert ["-exclude-tags", "dos,fuzz,intrusive,brute-force,bruteforce,slow"] == cmd[cmd.index("-exclude-tags"):cmd.index("-exclude-tags") + 2]
+    assert "-ni" in cmd
     assert "-unsafe" not in cmd
     assert ["-o", str(outfile)] == cmd[cmd.index("-o"):cmd.index("-o") + 2]
 

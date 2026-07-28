@@ -1089,7 +1089,8 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
 
 def _nuclei_input_urls(db: Session, scan: models.Scan, urls: list[str] | None = None) -> list[str]:
     config = scan.config or {}
-    max_urls = int(config.get("nuclei_max_urls", 500))
+    max_urls = int(config.get("nuclei_max_urls", 25))
+    include_content_paths = bool(config.get("nuclei_include_content_paths", False))
     ordered: list[str] = []
     seen: set[str] = set()
 
@@ -1113,14 +1114,15 @@ def _nuclei_input_urls(db: Session, scan: models.Scan, urls: list[str] | None = 
     for row in http_query.order_by(models.HttpxResult.status_code.asc()).all():
         add(row.url)
 
-    dir_query = db.query(models.DirbResult.url).filter(
-        models.DirbResult.scan_id == scan.id,
-        models.DirbResult.confidence.in_(["confirmed", "possible"]),
-    )
-    for row in dir_query.order_by(models.DirbResult.status_code.asc()).all():
-        add(row.url)
-        if len(ordered) >= max_urls:
-            break
+    if include_content_paths:
+        dir_query = db.query(models.DirbResult.url).filter(
+            models.DirbResult.scan_id == scan.id,
+            models.DirbResult.confidence.in_(["confirmed", "possible"]),
+        )
+        for row in dir_query.order_by(models.DirbResult.status_code.asc()).all():
+            add(row.url)
+            if len(ordered) >= max_urls:
+                break
 
     return ordered[:max_urls]
 
@@ -1129,12 +1131,13 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
     config = scan.config or {}
     profile = str(config.get("nuclei_profile") or "light").lower()
     profile_defaults = {
-        "light": {"severity": "high,critical", "max_urls": 100, "concurrency": 10, "rate_limit": 25, "timeout": 4, "retries": 0, "stage_timeout": 600, "exclude_tags": "dos,fuzz,intrusive"},
-        "balanced": {"severity": "medium,high,critical", "max_urls": 250, "concurrency": 15, "rate_limit": 30, "timeout": 5, "retries": 0, "stage_timeout": 1200, "exclude_tags": "dos,fuzz,intrusive"},
-        "full": {"severity": "medium,high,critical", "max_urls": 500, "concurrency": 20, "rate_limit": 30, "timeout": 5, "retries": 1, "stage_timeout": 1800, "exclude_tags": ""},
+        "light": {"nuclei_severity": "high,critical", "nuclei_tags": "exposure,takeover", "nuclei_types": "http", "nuclei_max_urls": 25, "nuclei_concurrency": 10, "nuclei_rate_limit": 25, "nuclei_timeout": 4, "nuclei_retries": 0, "nuclei_stage_timeout": 300, "nuclei_exclude_tags": "dos,fuzz,intrusive,brute-force,bruteforce,slow", "nuclei_no_interactsh": True, "nuclei_include_content_paths": False},
+        "balanced": {"nuclei_severity": "medium,high,critical", "nuclei_tags": "", "nuclei_types": "http,ssl", "nuclei_max_urls": 100, "nuclei_concurrency": 15, "nuclei_rate_limit": 30, "nuclei_timeout": 5, "nuclei_retries": 0, "nuclei_stage_timeout": 900, "nuclei_exclude_tags": "dos,fuzz,intrusive,brute-force,bruteforce,slow", "nuclei_no_interactsh": True, "nuclei_include_content_paths": True},
+        "full": {"nuclei_severity": "medium,high,critical", "nuclei_tags": "", "nuclei_types": "", "nuclei_max_urls": 500, "nuclei_concurrency": 20, "nuclei_rate_limit": 30, "nuclei_timeout": 5, "nuclei_retries": 1, "nuclei_stage_timeout": 1800, "nuclei_exclude_tags": "", "nuclei_no_interactsh": False, "nuclei_include_content_paths": True},
     }.get(profile, {})
     for key, value in profile_defaults.items():
-        config.setdefault(f"nuclei_{key}", value)
+        if key not in config or config.get(key) in (None, ""):
+            config[key] = value
     input_urls = _nuclei_input_urls(db, scan, urls)
     infile = raw_path(scan.id, "nuclei", "input")
     outfile = raw_path(scan.id, "nuclei", "nuclei", "jsonl")
@@ -1166,11 +1169,14 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
         str(config.get("nuclei_tags") or ""),
         str(config.get("nuclei_exclude_tags") or ""),
         str(config.get("nuclei_templates") or ""),
+        bool(config.get("nuclei_no_interactsh", True)),
+        str(config.get("nuclei_types") or ""),
     )
     log_out = raw_path(scan.id, "nuclei", "nuclei-log")
     log_out.write_text(f"Running: {' '.join(cmd)}\n", encoding="utf-8")
     record_raw(db, scan.id, "nuclei", "nuclei-log", log_out)
     stage_timeout = int(config.get("nuclei_stage_timeout", 900))
+    timed_out = False
     try:
         if runner:
             stdout, stderr = runner.run_stream(
@@ -1189,7 +1195,10 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
         err.write_text("\n".join(part for part in [stderr, stdout, str(exc)] if part), encoding="utf-8")
         record_raw(db, scan.id, "nuclei", "nuclei-input", infile)
         record_raw(db, scan.id, "nuclei", "nuclei-error", err)
-        raise
+        if exc.returncode == -1:
+            timed_out = True
+        else:
+            raise
     except Exception as exc:
         err = raw_path(scan.id, "nuclei", "nuclei-error")
         err.write_text(str(exc), encoding="utf-8")
@@ -1238,6 +1247,9 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
     if pending:
         db.add_all(pending)
         db.commit()
+    if timed_out:
+        stats["timed_out"] = True
+        stats["error"] = f"Nuclei reached the {stage_timeout}s stage timeout; saved partial output."
     return stats
 
 
@@ -1567,6 +1579,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         scan.started_at = datetime.now(UTC)
         set_scan(db, scan, stage_only or "subdomains", 5)
         ffuf_stats = None
+        nuclei_stats = None
         urls: list[str] | None = None
 
         if stage_only in (None, "subdomains"):
@@ -1610,7 +1623,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         if (scan.config or {}).get("run_nuclei", True) and stage_only in (None, "nuclei"):
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "nuclei", 76)
-            run_nuclei(db, scan, urls)
+            nuclei_stats = run_nuclei(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
         if (scan.config or {}).get("run_parameters", True) and stage_only in (None, "parameters", "ffuf"):
@@ -1635,6 +1648,8 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
         if ffuf_stats and ffuf_stats.get("failed_hosts"):
             error = f"FFUF had {ffuf_stats['failed_hosts']} host failure(s); {ffuf_stats.get('successful_hosts', 0)} host(s) completed."
             set_scan(db, scan, "partial", 100, "partial", error)
+        elif nuclei_stats and nuclei_stats.get("timed_out"):
+            set_scan(db, scan, "partial", 100, "partial", nuclei_stats.get("error"))
         else:
             set_scan(db, scan, "complete", 100, "complete")
     except ScanStopped:

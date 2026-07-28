@@ -51,15 +51,18 @@ class RunScanRequest(BaseModel):
     run_nuclei: bool = True
     nuclei_profile: str = "light"
     nuclei_severity: str = "high,critical"
-    nuclei_tags: str = ""
-    nuclei_exclude_tags: str = "dos,fuzz,intrusive"
+    nuclei_tags: str = "exposure,takeover"
+    nuclei_exclude_tags: str = "dos,fuzz,intrusive,brute-force,bruteforce,slow"
+    nuclei_types: str = "http"
     nuclei_templates: str = ""
     nuclei_concurrency: int = Field(default=10, ge=1, le=100)
     nuclei_rate_limit: int = Field(default=25, ge=1, le=500)
     nuclei_timeout: int = Field(default=4, ge=1, le=60)
     nuclei_retries: int = Field(default=0, ge=0, le=5)
-    nuclei_stage_timeout: int = Field(default=600, ge=30, le=7200)
-    nuclei_max_urls: int = Field(default=100, ge=1, le=10000)
+    nuclei_stage_timeout: int = Field(default=300, ge=30, le=7200)
+    nuclei_max_urls: int = Field(default=25, ge=1, le=10000)
+    nuclei_no_interactsh: bool = True
+    nuclei_include_content_paths: bool = False
     katana_depth: int = Field(default=2, ge=1, le=5)
     run_katana_headless: bool = False
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
@@ -116,15 +119,18 @@ class StageRerunRequest(BaseModel):
     run_nuclei: bool = True
     nuclei_profile: str = "light"
     nuclei_severity: str = "high,critical"
-    nuclei_tags: str = ""
-    nuclei_exclude_tags: str = "dos,fuzz,intrusive"
+    nuclei_tags: str = "exposure,takeover"
+    nuclei_exclude_tags: str = "dos,fuzz,intrusive,brute-force,bruteforce,slow"
+    nuclei_types: str = "http"
     nuclei_templates: str = ""
     nuclei_concurrency: int = 10
     nuclei_rate_limit: int = 25
     nuclei_timeout: int = 4
     nuclei_retries: int = 0
-    nuclei_stage_timeout: int = 600
-    nuclei_max_urls: int = 100
+    nuclei_stage_timeout: int = 300
+    nuclei_max_urls: int = 25
+    nuclei_no_interactsh: bool = True
+    nuclei_include_content_paths: bool = False
     katana_depth: int = 2
     run_katana_headless: bool = False
     parameter_timeout: int = 240

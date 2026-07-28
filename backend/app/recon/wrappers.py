@@ -294,8 +294,10 @@ def build_nuclei_command(
     templates_path: Path | None = None,
     stats_interval: int = 10,
     tags: str = "",
-    exclude_tags: str = "dos,fuzz,intrusive",
+    exclude_tags: str = "dos,fuzz,intrusive,brute-force,bruteforce,slow",
     templates: str = "",
+    no_interactsh: bool = True,
+    types: str = "http",
 ) -> list[str]:
     cmd = [
         "nuclei",
@@ -315,10 +317,14 @@ def build_nuclei_command(
         cmd.extend(["-t", str(templates_path)])
     if tags:
         cmd.extend(["-tags", tags])
+    if types:
+        cmd.extend(["-type", types])
     if exclude_tags:
         cmd.extend(["-exclude-tags", exclude_tags])
     for template in [part.strip() for part in templates.split(",") if part.strip()]:
         cmd.extend(["-id" if "/" not in template and "\\" not in template else "-t", template])
+    if no_interactsh:
+        cmd.append("-ni")
     return cmd
 
 
