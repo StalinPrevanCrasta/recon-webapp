@@ -187,7 +187,7 @@ def test_parameter_discovery_commands_and_parser(tmp_path):
     assert arjun_rows[0]["suspicious"] is True
 
 
-def test_nuclei_command_uses_medium_to_critical_jsonl(tmp_path):
+def test_nuclei_command_uses_light_jsonl_defaults(tmp_path):
     infile = tmp_path / "urls.txt"
     outfile = tmp_path / "nuclei.jsonl"
     templates = tmp_path / "templates"
@@ -195,13 +195,14 @@ def test_nuclei_command_uses_medium_to_critical_jsonl(tmp_path):
 
     assert cmd[:3] == ["nuclei", "-l", str(infile)]
     assert "-jsonl" in cmd
-    assert ["-severity", "medium,high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
+    assert ["-severity", "high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
     assert ["-c", "7"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
     assert ["-rl", "11"] == cmd[cmd.index("-rl"):cmd.index("-rl") + 2]
     assert ["-t", str(templates)] == cmd[cmd.index("-t"):cmd.index("-t") + 2]
     assert "-duc" in cmd
     assert "-stats" in cmd
     assert ["-si", "10"] == cmd[cmd.index("-si"):cmd.index("-si") + 2]
+    assert ["-exclude-tags", "dos,fuzz,intrusive"] == cmd[cmd.index("-exclude-tags"):cmd.index("-exclude-tags") + 2]
     assert "-unsafe" not in cmd
     assert ["-o", str(outfile)] == cmd[cmd.index("-o"):cmd.index("-o") + 2]
 

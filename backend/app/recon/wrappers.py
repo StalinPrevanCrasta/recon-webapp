@@ -285,14 +285,17 @@ def build_arjun_command(
 def build_nuclei_command(
     input_file: Path,
     output_file: Path,
-    severity: str = "medium,high,critical",
-    concurrency: int = 20,
-    rate_limit: int = 30,
-    timeout: int = 5,
-    retries: int = 1,
+    severity: str = "high,critical",
+    concurrency: int = 10,
+    rate_limit: int = 25,
+    timeout: int = 4,
+    retries: int = 0,
     unsafe: bool = True,
     templates_path: Path | None = None,
     stats_interval: int = 10,
+    tags: str = "",
+    exclude_tags: str = "dos,fuzz,intrusive",
+    templates: str = "",
 ) -> list[str]:
     cmd = [
         "nuclei",
@@ -310,6 +313,12 @@ def build_nuclei_command(
     ]
     if templates_path:
         cmd.extend(["-t", str(templates_path)])
+    if tags:
+        cmd.extend(["-tags", tags])
+    if exclude_tags:
+        cmd.extend(["-exclude-tags", exclude_tags])
+    for template in [part.strip() for part in templates.split(",") if part.strip()]:
+        cmd.extend(["-id" if "/" not in template and "\\" not in template else "-t", template])
     return cmd
 
 

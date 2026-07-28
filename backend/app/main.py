@@ -47,7 +47,7 @@ def docker_log_containers():
     return {"containers": list_allowed_containers()}
 
 @app.get("/api/system/logs/stream")
-def docker_log_stream(container: str = "all", tail: int = 200):
+def docker_log_stream(container: str = "all", tail: str = "1000"):
     if not viewer_enabled():
         raise HTTPException(403, LOG_VIEWER_DISABLED)
     try:

@@ -5,6 +5,69 @@ import './style.css';
 const API = '/api';
 const TABS = ['Subdomains', 'Live Hosts', 'Content Paths', 'Vulnerabilities', 'JS Intel', 'Parameters', 'Arjun', 'Screenshots', 'Raw Logs'];
 const INTERESTING_STATUS_CODES = new Set([200, 204, 301, 302, 401, 403, 500]);
+const DEFAULT_SCAN_OPTS = {
+  recursion_depth: 2,
+  ffuf_threads: 20,
+  ffuf_match_codes: 'all',
+  ffuf_mode: 'tech',
+  ffuf_recursive: false,
+  ffuf_auto_calibration: true,
+  ffuf_baseline_count: 3,
+  ffuf_host_timeout: 300,
+  run_naabu: true,
+  naabu_ports: '80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443',
+  subfinder_recursive: false,
+  use_crtsh: false,
+  use_cached_subdomains: true,
+  refresh_passive_subdomains: true,
+  fresh_subdomain_scan: false,
+  run_amass: false,
+  amass_timeout: 600,
+  wappalyzer_scan_type: 'balanced',
+  wappalyzer_workers: 5,
+  run_ffuf: true,
+  run_js_intel: true,
+  js_intel_max_hosts: 80,
+  js_intel_max_scripts_per_host: 25,
+  js_intel_max_bytes: 2000000,
+  js_intel_timeout: 180,
+  trufflehog_results: 'verified,unknown,unverified',
+  trufflehog_concurrency: 4,
+  run_nuclei: true,
+  nuclei_profile: 'light',
+  nuclei_severity: 'high,critical',
+  nuclei_tags: '',
+  nuclei_exclude_tags: 'dos,fuzz,intrusive',
+  nuclei_templates: '',
+  nuclei_concurrency: 10,
+  nuclei_rate_limit: 25,
+  nuclei_timeout: 4,
+  nuclei_retries: 0,
+  nuclei_stage_timeout: 600,
+  nuclei_max_urls: 100,
+  run_parameters: true,
+  katana_depth: 2,
+  run_katana_headless: false,
+  parameter_timeout: 240,
+  katana_crawl_duration: '2m',
+  run_arjun: false,
+  arjun_methods: 'GET',
+  arjun_timeout: 240,
+  arjun_threads: 5,
+  arjun_request_timeout: 10,
+  arjun_stable: true,
+  run_screenshots: true,
+  use_subdomains_top1million_110000: false,
+  use_bug_bounty_subdomains_trickest: false,
+};
+
+function loadStoredScanOpts() {
+  try {
+    return {...DEFAULT_SCAN_OPTS, ...JSON.parse(localStorage.getItem('scan.options') || '{}')};
+  } catch {
+    return DEFAULT_SCAN_OPTS;
+  }
+}
 
 async function j(url, options = {}) {
   const isForm = options.body instanceof FormData;
@@ -290,9 +353,14 @@ function Filters({filters, setFilters}) {
   return <>
     <div className="filters compact-filters">
       <input className="wide" placeholder="/ Search host, title, tech, IP, tag..." value={filters.q} onChange={e => setFilters({...filters, q: e.target.value})}/>
-      <input placeholder="Status" value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}/>
+      <input placeholder="Host / URL" value={filters.host} onChange={e => setFilters({...filters, host: e.target.value})}/>
+      <input placeholder="Status e.g. 200, 403" value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}/>
+      <input placeholder="Title / Path / Finding" value={filters.title} onChange={e => setFilters({...filters, title: e.target.value})}/>
       <input placeholder="Technology" value={filters.tech} onChange={e => setFilters({...filters, tech: e.target.value})}/>
       <input placeholder="IP / ASN" value={filters.ip} onChange={e => setFilters({...filters, ip: e.target.value})}/>
+      <input placeholder="Source" value={filters.source} onChange={e => setFilters({...filters, source: e.target.value})}/>
+      <input placeholder="Tags" value={filters.tags} onChange={e => setFilters({...filters, tags: e.target.value})}/>
+      <input placeholder="Confidence / Severity" value={filters.confidence} onChange={e => setFilters({...filters, confidence: e.target.value})}/>
     </div>
     <div className="filter-chips">{chips.map(chip => <button key={chip} className={filters.chips.includes(chip) ? 'chip active' : 'chip'} onClick={() => toggleChip(chip)}>{chip}</button>)}</div>
   </>;
@@ -301,10 +369,20 @@ function Filters({filters, setFilters}) {
 function applyFilters(rows, filters) {
   return rows.filter(row => {
     const blob = JSON.stringify({...row, tags: tagsFor(row)}).toLowerCase();
+    const value = String(row.url || row.source_url || row.matched_at || row.name || '').toLowerCase();
+    const title = String(row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || row.reason || row.evidence || row.description || '').toLowerCase();
+    const source = String((row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || '').toLowerCase();
+    const tagBlob = tagsFor(row).join(' ').toLowerCase();
+    const confidence = String(row.confidence || row.severity || '').toLowerCase();
     return (!filters.q || blob.includes(filters.q.toLowerCase())) &&
+      (!filters.host || value.includes(filters.host.toLowerCase())) &&
       (!filters.status || String(row.status_code || '').includes(filters.status)) &&
+      (!filters.title || title.includes(filters.title.toLowerCase())) &&
       (!filters.tech || blob.includes(filters.tech.toLowerCase())) &&
       (!filters.ip || String(row.ip || '').includes(filters.ip)) &&
+      (!filters.source || source.includes(filters.source.toLowerCase())) &&
+      (!filters.tags || tagBlob.includes(filters.tags.toLowerCase())) &&
+      (!filters.confidence || confidence.includes(filters.confidence.toLowerCase())) &&
       (!filters.chips.includes('Interesting') || row.interesting) &&
       (!filters.chips.includes('Interesting Status') || INTERESTING_STATUS_CODES.has(Number(row.status_code))) &&
       (!filters.chips.includes('Suspicious Param') || row.suspicious) &&
@@ -319,7 +397,7 @@ function applyFilters(rows, filters) {
 }
 
 function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInteresting}) {
-  const [filters, setFilters] = useState({q: '', status: '', tech: '', ip: '', chips: []});
+  const [filters, setFilters] = useState({q: '', host: '', status: '', title: '', tech: '', ip: '', source: '', tags: '', confidence: '', chips: []});
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
@@ -330,28 +408,56 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
   const copy = value => navigator.clipboard?.writeText(value).catch(() => {});
   return <>
     <Filters filters={filters} setFilters={setFilters}/>
-    <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.source_url || r.matched_at || r.name).filter(Boolean).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
-    <table><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
+    <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.source_url || r.name || r.matched_at).filter(Boolean).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
+    <div className="table-wrap"><table className="asset-table"><colgroup><col className="col-select"/><col className="col-host"/><col className="col-status"/><col className="col-title"/><col className="col-ip"/><col className="col-tech"/><col className="col-source"/><col className="col-tags"/><col className="col-confidence"/><col className="col-actions"/></colgroup><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
       const value = row.url || row.source_url || row.matched_at || row.name;
       const tags = tagsFor(row);
       return <tr key={`${kind}-${row.id}`} onClick={() => selectRow({...row, kind})} className={row.is_new ? 'new' : ''}>
         <td onClick={e => e.stopPropagation()}><input type="checkbox" checked={selectedIds.has(row.id)} onChange={e => toggleSelected(row.id, e.target.checked)}/></td>
-        <td><div className="host-cell">{faviconFor(value)}<div><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div></div></div></td>
+        <td title={value}><div className="host-cell">{faviconFor(value)}<div><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div></div></div></td>
         <td>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : <span className="muted">—</span>}</td>
-        <td>{row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || <span className="muted">—</span>}<div className="subtext">{row.reason || row.evidence || row.description || ''}</div></td>
+        <td title={[row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || '', row.reason || row.evidence || row.description || ''].filter(Boolean).join('\n')}><div className="cell-main">{row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || <span className="muted">—</span>}</div><div className="subtext">{row.reason || row.evidence || row.description || ''}</div></td>
         <td>{row.ip || (row.line ? `Line ${row.line}` : <span className="muted">—</span>)}<div className="subtext">{(row.ports || []).length ? `Ports ${(row.ports || []).join(', ')}` : row.column ? `Column ${row.column}` : ''}</div></td>
         <td>{row.finding_type ? <TechBadges tech={[row.finding_type, ...(row.tags || [])]} /> : row.template_id ? <TechBadges tech={[row.type || 'nuclei', ...(row.tags || [])]} /> : <TechBadges tech={[...(row.fingerprints || []), ...(row.tech || [])]} />}</td>
-        <td>{(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</td>
+        <td title={(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div></td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
         <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
       </tr>;
-    })}</tbody></table>
+    })}</tbody></table></div>
   </>;
 }
 
 function ScreenshotGallery({rows, selectRow, markInteresting}) {
-  return <div className="gallery">{rows.map(s => <figure key={s.id} onClick={() => selectRow({...s, kind: 'screenshots'})}><a href={s.image_url} target="_blank" rel="noreferrer"><img src={s.image_url}/></a><figcaption><b>{hostFromUrl(s.url)}</b><div><Badge tone="ok">Screenshot</Badge>{s.interesting && <Badge tone="hot">Marked</Badge>}</div><button onClick={e => { e.preventDefault(); e.stopPropagation(); markInteresting('screenshots', s); }}>Mark screenshot</button></figcaption></figure>)}</div>;
+  const [lightboxIndex, setLightboxIndex] = useState(null);
+  const current = lightboxIndex == null ? null : rows[lightboxIndex];
+  const close = useCallback(() => setLightboxIndex(null), []);
+  const move = useCallback(delta => setLightboxIndex(index => {
+    if (index == null || !rows.length) return index;
+    return (index + delta + rows.length) % rows.length;
+  }), [rows.length]);
+  useEffect(() => {
+    if (lightboxIndex == null) return;
+    function onKey(e) {
+      if (e.key === 'Escape') close();
+      if (e.key === 'ArrowRight') move(1);
+      if (e.key === 'ArrowLeft') move(-1);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightboxIndex, close, move]);
+  return <>
+    <div className="gallery">{rows.map((s, index) => <figure key={s.id} onClick={() => selectRow({...s, kind: 'screenshots'})}><button className="shot-preview" onClick={e => { e.preventDefault(); e.stopPropagation(); setLightboxIndex(index); }}><img src={s.image_url} alt={`Screenshot of ${s.url}`}/></button><figcaption><b>{hostFromUrl(s.url)}</b><div><Badge tone="ok">Screenshot</Badge>{s.interesting && <Badge tone="hot">Marked</Badge>}</div><button onClick={e => { e.preventDefault(); e.stopPropagation(); markInteresting('screenshots', s); }}>Mark screenshot</button></figcaption></figure>)}</div>
+    {current && <div className="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot preview" onMouseDown={close}>
+      <div className="lightbox-panel" onMouseDown={e => e.stopPropagation()}>
+        <div className="lightbox-head"><b>{hostFromUrl(current.url)}</b><span>{lightboxIndex + 1} / {rows.length}</span><button onClick={close}>Close</button></div>
+        <button className="lightbox-nav prev" aria-label="Previous screenshot" onClick={() => move(-1)}>Prev</button>
+        <img src={current.image_url} alt={`Screenshot of ${current.url}`}/>
+        <button className="lightbox-nav next" aria-label="Next screenshot" onClick={() => move(1)}>Next</button>
+        <div className="lightbox-foot"><span>{current.url}</span><button onClick={() => navigator.clipboard?.writeText(current.url)}>Copy URL</button><button onClick={() => markInteresting('screenshots', current)}>Mark</button></div>
+      </div>
+    </div>}
+  </>;
 }
 
 function RawConsole({rows}) {
@@ -462,7 +568,7 @@ function LogsPage() {
   const [autoScroll, setAutoScroll] = useState(localStorage.getItem('logs.autoscroll') !== 'false');
   const [query, setQuery] = useState('');
   const [level, setLevel] = useState('All');
-  const [tail, setTail] = useState(Number(localStorage.getItem('logs.tail') || 200));
+  const [tail, setTail] = useState(localStorage.getItem('logs.tail') || '1000');
   const [jump, setJump] = useState(false);
   const {lines, setLines, pending, status, error} = useContainerLogs({container, tail, paused, bufferLimit: 10000});
   const endRef = React.useRef(null);
@@ -476,11 +582,12 @@ function LogsPage() {
   const rendered = visible.slice(-1000);
   function copyVisible() { navigator.clipboard?.writeText(visible.map(formatLogLine).join('\n')); }
   function downloadVisible() { const blob = new Blob([visible.map(formatLogLine).join('\n')], {type: 'text/plain'}); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `container-logs-${container}.txt`; a.click(); URL.revokeObjectURL(a.href); }
+  function setTailNumber(value) { setTail(String(Math.min(2000, Math.max(0, Number(value) || 0)))); }
   function onScroll() { const el = scrollerRef.current; if (!el) return; const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48; if (!nearBottom) { setAutoScroll(false); setJump(true); } else setJump(false); }
   function reconnect() { window.location.reload(); }
   return <div className="logs-page"><div className="logs-toolbar"><div><h1>Live Container Logs</h1><p>Docker Compose infrastructure logs. Content is redacted server-side and rendered as plain text.</p></div><Badge tone={status === 'Connected' ? 'ok' : status === 'Reconnecting' ? 'warn' : 'server'}>{status}</Badge><button onClick={reconnect}>Reconnect</button></div>
     {error && <div className="inline-alert">{error}</div>}
-    <div className="logs-toolbar sticky"><label>Container <select value={container} onChange={e => setContainer(e.target.value)}><option value="all">All containers</option>{containers.map(c => <option key={c.id} value={c.id}>{c.display_name} ({c.status})</option>)}</select></label><input className="wide" placeholder="Search/filter logs" value={query} onChange={e => setQuery(e.target.value)}/><label>Level <select value={level} onChange={e => setLevel(e.target.value)}>{['All','DEBUG','INFO','WARNING','ERROR','CRITICAL'].map(x => <option key={x}>{x}</option>)}</select></label><label>Tail <input type="number" min="0" max="2000" value={tail} onChange={e => setTail(Math.min(2000, Math.max(0, Number(e.target.value) || 0)))}/></label><button onClick={() => setPaused(!paused)}>{paused ? `Resume${pending ? ` (${pending})` : ''}` : 'Pause'}</button><button onClick={() => setLines([])}>Clear</button><label><input type="checkbox" checked={autoScroll} onChange={e => setAutoScroll(e.target.checked)}/> Auto-scroll</label><button onClick={copyVisible}>Copy visible logs</button><button onClick={downloadVisible}>Download</button><span>{visible.length} visible / {lines.length} buffered</span></div>
+    <div className="logs-toolbar sticky"><label>Container <select value={container} onChange={e => setContainer(e.target.value)}><option value="all">All containers</option>{containers.map(c => <option key={c.id} value={c.id}>{c.display_name} ({c.status})</option>)}</select></label><input className="wide" placeholder="Search/filter logs" value={query} onChange={e => setQuery(e.target.value)}/><label>Level <select value={level} onChange={e => setLevel(e.target.value)}>{['All','DEBUG','INFO','WARNING','ERROR','CRITICAL'].map(x => <option key={x}>{x}</option>)}</select></label><label>Tail <input type="number" min="0" max="2000" disabled={tail === 'all'} value={tail === 'all' ? 0 : tail} onChange={e => setTailNumber(e.target.value)}/></label><button onClick={() => setTail(tail === 'all' ? '1000' : 'all')}>{tail === 'all' ? 'Latest only' : 'Load all history'}</button><button onClick={() => setPaused(!paused)}>{paused ? `Resume${pending ? ` (${pending})` : ''}` : 'Pause'}</button><button onClick={() => setLines([])}>Clear</button><label><input type="checkbox" checked={autoScroll} onChange={e => setAutoScroll(e.target.checked)}/> Auto-scroll</label><button onClick={copyVisible}>Copy visible logs</button><button onClick={downloadVisible}>Download</button><span>{visible.length} visible / {lines.length} buffered</span></div>
     <div className="logs-shell" ref={scrollerRef} onScroll={onScroll}>{rendered.map((line, idx) => <div className={`container-log-line c-${line.container}`} key={`${line.timestamp}-${idx}`}><span className="log-time">{line.timestamp}</span><span className="container-badge">{line.container}</span><Badge tone={levelTone(line.level)}>{line.level}</Badge><span className="log-message">{highlight(line.message || '', query)}</span></div>)}<div ref={endRef}/></div>{jump && <button className="jump-latest" onClick={() => { setAutoScroll(true); setJump(false); endRef.current?.scrollIntoView(); }}>Jump to latest</button>}
   </div>;
 }
@@ -502,7 +609,8 @@ function App() {
   const [targetDrawerOpen, setTargetDrawerOpen] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const targetLoadSequence = useRef(0);
-  const [opts, setOpts] = useState({recursion_depth: 2, ffuf_threads: 20, ffuf_match_codes: 'all', ffuf_mode: 'tech', ffuf_recursive: false, ffuf_auto_calibration: true, ffuf_baseline_count: 3, ffuf_host_timeout: 300, run_naabu: true, naabu_ports: '80,81,3000,3001,5000,5173,7001,8000,8008,8080,8081,8443,8888,9000,9443,10443', subfinder_recursive: false, use_crtsh: false, use_cached_subdomains: true, refresh_passive_subdomains: true, fresh_subdomain_scan: false, run_amass: false, amass_timeout: 600, wappalyzer_scan_type: 'balanced', wappalyzer_workers: 5, run_ffuf: true, run_js_intel: true, js_intel_max_hosts: 80, js_intel_max_scripts_per_host: 25, js_intel_max_bytes: 2000000, js_intel_timeout: 180, trufflehog_results: 'verified,unknown,unverified', trufflehog_concurrency: 4, nuclei_concurrency: 20, nuclei_rate_limit: 30, nuclei_timeout: 5, nuclei_retries: 1, nuclei_stage_timeout: 1800, nuclei_max_urls: 500, run_parameters: true, katana_depth: 2, run_katana_headless: false, parameter_timeout: 240, katana_crawl_duration: '2m', run_arjun: false, arjun_methods: 'GET', arjun_timeout: 240, arjun_threads: 5, arjun_request_timeout: 10, arjun_stable: true, run_screenshots: true, use_subdomains_top1million_110000: false, use_bug_bounty_subdomains_trickest: false});
+  const [opts, setOpts] = useState(loadStoredScanOpts);
+  useEffect(() => { localStorage.setItem('scan.options', JSON.stringify(opts)); }, [opts]);
 
   const refreshMeta = useCallback(async () => {
     const [targetRows, wordlistRows, appSettings, healthInfo] = await Promise.all([j(`${API}/targets`), j(`${API}/wordlists`), j(`${API}/settings`), j(`${API}/health`)]);
@@ -644,7 +752,7 @@ function App() {
     <SidebarGroup title="Request Settings">{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
     <SidebarGroup title="Port & Fingerprint"><label><input type="checkbox" checked={opts.run_naabu} onChange={e => setOpts({...opts, run_naabu: e.target.checked})}/> Run Naabu web-port discovery</label><input placeholder="naabu ports" value={opts.naabu_ports} onChange={e => setOpts({...opts, naabu_ports: e.target.value})}/><div className="option-stack always-on"><span className="setting-label">Wappalyzer fingerprinting</span><Badge tone="ok">Always on after httpx</Badge><select value={opts.wappalyzer_scan_type} onChange={e => setOpts({...opts, wappalyzer_scan_type: e.target.value})}><option value="balanced">Balanced</option><option value="fast">Fast</option><option value="full">Full browser mode</option></select><input placeholder="wappalyzer workers" value={opts.wappalyzer_workers} onChange={e => setOpts({...opts, wappalyzer_workers: Number(e.target.value) || 1})}/><p className="hint">Mandatory stage: Wappalyzer runs after httpx on all live hosts before tech-specific FFUF.</p></div></SidebarGroup>
     <SidebarGroup title="FFUF Options"><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label><select value={opts.ffuf_mode} onChange={e => setOpts({...opts, ffuf_mode: e.target.value})}><option value="tech">Tech-specific only</option><option value="combined">Tech-specific + generic</option><option value="generic">Generic only</option></select>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><input placeholder="host timeout seconds" value={opts.ffuf_host_timeout} onChange={e => setOpts({...opts, ffuf_host_timeout: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_auto_calibration} onChange={e => setOpts({...opts, ffuf_auto_calibration: e.target.checked})}/> Auto calibration (-ac)</label><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label><p className="hint">Tech-specific mode uses small focused wordlists based on fingerprints and response headers.</p></SidebarGroup>
-    <SidebarGroup title="Nuclei"><div className="option-stack always-on"><span className="setting-label">Medium to critical templates</span><Badge tone="ok">Always on</Badge><input placeholder="concurrency" value={opts.nuclei_concurrency} onChange={e => setOpts({...opts, nuclei_concurrency: Number(e.target.value) || 20})}/><input placeholder="rate limit req/s" value={opts.nuclei_rate_limit} onChange={e => setOpts({...opts, nuclei_rate_limit: Number(e.target.value) || 30})}/><input placeholder="request timeout seconds" value={opts.nuclei_timeout} onChange={e => setOpts({...opts, nuclei_timeout: Number(e.target.value) || 5})}/><input placeholder="retries" value={opts.nuclei_retries} onChange={e => setOpts({...opts, nuclei_retries: Number(e.target.value) || 0})}/><input placeholder="stage timeout seconds" value={opts.nuclei_stage_timeout} onChange={e => setOpts({...opts, nuclei_stage_timeout: Number(e.target.value) || 1800})}/><input placeholder="max URLs" value={opts.nuclei_max_urls} onChange={e => setOpts({...opts, nuclei_max_urls: Number(e.target.value) || 500})}/><p className="hint">Mandatory unsafe Nuclei runs after FFUF on live hosts and confirmed/possible content paths.</p></div></SidebarGroup>
+    <SidebarGroup title="Nuclei"><div className="option-stack"><span className="setting-label">Template scan</span><label><input type="checkbox" checked={opts.run_nuclei} onChange={e => setOpts({...opts, run_nuclei: e.target.checked})}/> Run Nuclei</label><select value={opts.nuclei_profile} onChange={e => setOpts({...opts, nuclei_profile: e.target.value})}><option value="light">Light and fast</option><option value="balanced">Balanced</option><option value="full">Full selected severities</option></select><input placeholder="severity high,critical" value={opts.nuclei_severity} onChange={e => setOpts({...opts, nuclei_severity: e.target.value || 'high,critical'})}/><input placeholder="include tags cves,exposure (optional)" value={opts.nuclei_tags} onChange={e => setOpts({...opts, nuclei_tags: e.target.value})}/><input placeholder="exclude tags dos,fuzz,intrusive" value={opts.nuclei_exclude_tags} onChange={e => setOpts({...opts, nuclei_exclude_tags: e.target.value})}/><input placeholder="specific templates or ids, comma-separated" value={opts.nuclei_templates} onChange={e => setOpts({...opts, nuclei_templates: e.target.value})}/><input placeholder="concurrency" value={opts.nuclei_concurrency} onChange={e => setOpts({...opts, nuclei_concurrency: Number(e.target.value) || 10})}/><input placeholder="rate limit req/s" value={opts.nuclei_rate_limit} onChange={e => setOpts({...opts, nuclei_rate_limit: Number(e.target.value) || 25})}/><input placeholder="request timeout seconds" value={opts.nuclei_timeout} onChange={e => setOpts({...opts, nuclei_timeout: Number(e.target.value) || 4})}/><input placeholder="retries" value={opts.nuclei_retries} onChange={e => setOpts({...opts, nuclei_retries: Number(e.target.value) || 0})}/><input placeholder="stage timeout seconds" value={opts.nuclei_stage_timeout} onChange={e => setOpts({...opts, nuclei_stage_timeout: Number(e.target.value) || 600})}/><input placeholder="max URLs" value={opts.nuclei_max_urls} onChange={e => setOpts({...opts, nuclei_max_urls: Number(e.target.value) || 100})}/><p className="hint">Light mode prioritizes high-signal templates and excludes slow or intrusive categories.</p></div></SidebarGroup>
     <SidebarGroup title="JS Intel"><div className="option-stack always-on"><span className="setting-label">JavaScript + TruffleHog</span><Badge tone="ok">Always on</Badge><input placeholder="max live hosts" value={opts.js_intel_max_hosts} onChange={e => setOpts({...opts, js_intel_max_hosts: Number(e.target.value) || 80})}/><input placeholder="max scripts per host" value={opts.js_intel_max_scripts_per_host} onChange={e => setOpts({...opts, js_intel_max_scripts_per_host: Number(e.target.value) || 25})}/><input placeholder="max bytes per file" value={opts.js_intel_max_bytes} onChange={e => setOpts({...opts, js_intel_max_bytes: Number(e.target.value) || 2000000})}/><input placeholder="stage timeout seconds" value={opts.js_intel_timeout} onChange={e => setOpts({...opts, js_intel_timeout: Number(e.target.value) || 180})}/><input placeholder="TruffleHog results verified,unknown,unverified" value={opts.trufflehog_results} onChange={e => setOpts({...opts, trufflehog_results: e.target.value || 'verified,unknown,unverified'})}/><input placeholder="TruffleHog concurrency" value={opts.trufflehog_concurrency} onChange={e => setOpts({...opts, trufflehog_concurrency: Number(e.target.value) || 4})}/><p className="hint">Always downloads/analyzes JS bundles, then runs TruffleHog filesystem secret scanning on those bundles.</p></div></SidebarGroup>
     <SidebarGroup title="Parameter Discovery"><label><input type="checkbox" checked={opts.run_parameters} onChange={e => setOpts({...opts, run_parameters: e.target.checked})}/> Run gau + Katana parameter discovery</label><input placeholder="katana depth" value={opts.katana_depth} onChange={e => setOpts({...opts, katana_depth: Number(e.target.value) || 2})}/><input placeholder="katana crawl duration (2m)" value={opts.katana_crawl_duration} onChange={e => setOpts({...opts, katana_crawl_duration: e.target.value || '2m'})}/><input placeholder="parameter timeout seconds" value={opts.parameter_timeout} onChange={e => setOpts({...opts, parameter_timeout: Number(e.target.value) || 240})}/><label><input type="checkbox" checked={opts.run_katana_headless} onChange={e => setOpts({...opts, run_katana_headless: e.target.checked})}/> Katana headless crawl</label><p className="hint">Extracts GET/POST parameters from gau and bounded Katana crawling only. Arjun runs as a separate stage.</p></SidebarGroup>
     <SidebarGroup title="Arjun Options"><input placeholder="methods GET or GET,POST" value={opts.arjun_methods} onChange={e => setOpts({...opts, arjun_methods: e.target.value || 'GET'})}/><input placeholder="arjun total timeout seconds" value={opts.arjun_timeout} onChange={e => setOpts({...opts, arjun_timeout: Number(e.target.value) || 240})}/><input placeholder="arjun threads" value={opts.arjun_threads} onChange={e => setOpts({...opts, arjun_threads: Number(e.target.value) || 5})}/><input placeholder="arjun request timeout seconds" value={opts.arjun_request_timeout} onChange={e => setOpts({...opts, arjun_request_timeout: Number(e.target.value) || 10})}/><label><input type="checkbox" checked={opts.arjun_stable} onChange={e => setOpts({...opts, arjun_stable: e.target.checked})}/> Prefer stability over speed</label><p className="hint">Arjun is manual-only. Select URLs on the Arjun page and run it when you want hidden parameter probing.</p></SidebarGroup>

@@ -590,7 +590,7 @@ def test_run_js_intel_runs_trufflehog_on_downloaded_bundles(monkeypatch, tmp_pat
 
 
 def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
-    db, target, scan = make_scan({"nuclei_concurrency": 9, "nuclei_rate_limit": 17, "nuclei_timeout": 4, "nuclei_max_urls": 10})
+    db, target, scan = make_scan({"nuclei_concurrency": 9, "nuclei_rate_limit": 17, "nuclei_timeout": 4, "nuclei_max_urls": 10, "nuclei_severity": "high,critical"})
     db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://app.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
     db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/.git/config", normalized_path="/.git/config", method="GET", status_code=200, confidence="confirmed", headers_sent={}, first_seen_scan_id=scan.id))
     db.add(models.DirbResult(target_id=target.id, scan_id=scan.id, base_url="https://app.example", url="https://app.example/noise", normalized_path="/noise", method="GET", status_code=404, confidence="filtered", headers_sent={}, first_seen_scan_id=scan.id))
@@ -607,7 +607,7 @@ def test_run_nuclei_scans_live_hosts_and_confirmed_paths(monkeypatch, tmp_path):
         assert "-duc" in cmd
         assert "-stats" in cmd
         assert ["-si", "10"] == cmd[cmd.index("-si"):cmd.index("-si") + 2]
-        assert ["-severity", "medium,high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
+        assert ["-severity", "high,critical"] == cmd[cmd.index("-severity"):cmd.index("-severity") + 2]
         assert ["-c", "9"] == cmd[cmd.index("-c"):cmd.index("-c") + 2]
         assert ["-rl", "17"] == cmd[cmd.index("-rl"):cmd.index("-rl") + 2]
         outfile = Path(cmd[cmd.index("-o") + 1])

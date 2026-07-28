@@ -67,7 +67,7 @@ def allowed_services() -> list[str]:
     return services
 
 
-def default_tail() -> int:
+def default_tail() -> int | str:
     return clamp_tail(os.getenv("DOCKER_LOG_TAIL", "200"))
 
 
@@ -78,7 +78,9 @@ def max_tail() -> int:
         return 2000
 
 
-def clamp_tail(value: int | str | None) -> int:
+def clamp_tail(value: int | str | None) -> int | str:
+    if isinstance(value, str) and value.strip().lower() in {"all", "-1"}:
+        return "all"
     try:
         tail = int(value) if value is not None else 200
     except ValueError:
@@ -169,7 +171,7 @@ def release_client() -> None:
         _active_clients = max(0, _active_clients - 1)
 
 
-def reader_thread(client, service: str, tail: int, stop: threading.Event, out: queue.Queue) -> None:
+def reader_thread(client, service: str, tail: int | str, stop: threading.Event, out: queue.Queue) -> None:
     try:
         container = find_container(client, service)
         if not container:

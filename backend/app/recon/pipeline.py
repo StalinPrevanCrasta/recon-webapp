@@ -1127,6 +1127,14 @@ def _nuclei_input_urls(db: Session, scan: models.Scan, urls: list[str] | None = 
 
 def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
     config = scan.config or {}
+    profile = str(config.get("nuclei_profile") or "light").lower()
+    profile_defaults = {
+        "light": {"severity": "high,critical", "max_urls": 100, "concurrency": 10, "rate_limit": 25, "timeout": 4, "retries": 0, "stage_timeout": 600, "exclude_tags": "dos,fuzz,intrusive"},
+        "balanced": {"severity": "medium,high,critical", "max_urls": 250, "concurrency": 15, "rate_limit": 30, "timeout": 5, "retries": 0, "stage_timeout": 1200, "exclude_tags": "dos,fuzz,intrusive"},
+        "full": {"severity": "medium,high,critical", "max_urls": 500, "concurrency": 20, "rate_limit": 30, "timeout": 5, "retries": 1, "stage_timeout": 1800, "exclude_tags": ""},
+    }.get(profile, {})
+    for key, value in profile_defaults.items():
+        config.setdefault(f"nuclei_{key}", value)
     input_urls = _nuclei_input_urls(db, scan, urls)
     infile = raw_path(scan.id, "nuclei", "input")
     outfile = raw_path(scan.id, "nuclei", "nuclei", "jsonl")
@@ -1147,14 +1155,17 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
     cmd = build_nuclei_command(
         infile,
         outfile,
-        "medium,high,critical",
-        int(config.get("nuclei_concurrency", 20)),
-        int(config.get("nuclei_rate_limit", 30)),
-        int(config.get("nuclei_timeout", 5)),
-        int(config.get("nuclei_retries", 1)),
+        str(config.get("nuclei_severity") or "high,critical"),
+        int(config.get("nuclei_concurrency", 10)),
+        int(config.get("nuclei_rate_limit", 25)),
+        int(config.get("nuclei_timeout", 4)),
+        int(config.get("nuclei_retries", 0)),
         True,
         Path(os.getenv("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")),
         int(config.get("nuclei_stats_interval", 10)),
+        str(config.get("nuclei_tags") or ""),
+        str(config.get("nuclei_exclude_tags") or ""),
+        str(config.get("nuclei_templates") or ""),
     )
     log_out = raw_path(scan.id, "nuclei", "nuclei-log")
     log_out.write_text(f"Running: {' '.join(cmd)}\n", encoding="utf-8")
@@ -1199,7 +1210,7 @@ def run_nuclei(db: Session, scan: models.Scan, urls: list[str] | None = None) ->
 
     findings = [
         item for item in parse_nuclei_jsonl(outfile.read_text(errors="ignore"))
-        if item.get("severity") in {"medium", "high", "critical"}
+        if item.get("severity") in {part.strip().lower() for part in str(config.get("nuclei_severity") or "high,critical").split(",") if part.strip()}
     ]
     existing = {
         (r.template_id, r.matched_at)
@@ -1596,7 +1607,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             ffuf_stats = run_ffuf(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
-        if stage_only in (None, "nuclei"):
+        if (scan.config or {}).get("run_nuclei", True) and stage_only in (None, "nuclei"):
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "nuclei", 76)
             run_nuclei(db, scan, urls)
