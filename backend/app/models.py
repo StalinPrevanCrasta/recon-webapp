@@ -189,6 +189,24 @@ class RawOutput(Base):
     path: Mapped[str] = mapped_column(String(2048))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+class PlaygroundRequest(Base):
+    __tablename__ = "playground_requests"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("targets.id"), index=True)
+    method: Mapped[str] = mapped_column(String(16), default="GET", index=True)
+    url: Mapped[str] = mapped_column(String(2048), index=True)
+    request_headers: Mapped[dict] = mapped_column(JSON, default=dict)
+    request_body: Mapped[str | None] = mapped_column(Text)
+    status_code: Mapped[int | None] = mapped_column(Integer, index=True)
+    response_headers: Mapped[dict] = mapped_column(JSON, default=dict)
+    response_body: Mapped[str | None] = mapped_column(Text)
+    response_size: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    interesting: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
 class Wordlist(Base):
     __tablename__ = "wordlists"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

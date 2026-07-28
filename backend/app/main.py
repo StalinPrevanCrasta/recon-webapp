@@ -1,9 +1,15 @@
 import csv
 import io
 import os
+import shutil
+import subprocess
+import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx as pyhttpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -13,17 +19,20 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.db import get_db, init_db
-from app.schemas import ArjunRunRequest, InterestingPatch, RunScanRequest, Settings, StageRerunRequest
+from app.schemas import ArjunRunRequest, InterestingPatch, PlaygroundRequestSend, PlaygroundToolRequest, RunScanRequest, Settings, StageRerunRequest
 from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
-from app.recon.runner import cancel_scan
+from app.recon.runner import CommandError, cancel_scan, run_command
+from app.recon.wrappers import build_arjun_command, parse_arjun_json
 from app.recon.wordlists import FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
 from app.docker_logs import LOG_VIEWER_DISABLED, list_allowed_containers, stream_logs, validate_container_selection, viewer_enabled, clamp_tail
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 WORDLIST_DIR = DATA_DIR / "wordlists"
 SCREEN_DIR = DATA_DIR / "screenshots"
+PLAYGROUND_DIR = DATA_DIR / "playground"
+PLAYGROUND_BODY_LIMIT = 200000
 
 app = FastAPI(title="Bug Bounty Recon Webapp")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -33,6 +42,7 @@ def startup():
     init_db()
     WORDLIST_DIR.mkdir(parents=True, exist_ok=True)
     SCREEN_DIR.mkdir(parents=True, exist_ok=True)
+    PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount("/screenshots", StaticFiles(directory=str(SCREEN_DIR), check_dir=False), name="screenshots")
 
@@ -64,6 +74,172 @@ def get_settings():
 @app.put("/api/settings", response_model=Settings)
 def put_settings(settings: Settings):
     return save_settings(settings)
+
+
+def _validate_playground_url(url: str) -> str:
+    normalized = str(url or "").strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(422, "Playground URL must be an absolute http or https URL.")
+    return normalized
+
+
+def _row_playground_request(row: models.PlaygroundRequest) -> dict:
+    return {
+        "id": row.id,
+        "target_id": row.target_id,
+        "method": row.method,
+        "url": row.url,
+        "request_headers": row.request_headers or {},
+        "request_body": row.request_body or "",
+        "status_code": row.status_code,
+        "response_headers": row.response_headers or {},
+        "response_body": row.response_body or "",
+        "response_size": row.response_size,
+        "duration_ms": row.duration_ms,
+        "error": row.error,
+        "interesting": row.interesting,
+        "note": row.note,
+        "created_at": row.created_at,
+    }
+
+
+@app.get("/api/playground/history")
+def playground_history(limit: int = 30, target_id: int | None = None, db: Session = Depends(get_db)):
+    query = db.query(models.PlaygroundRequest)
+    if target_id:
+        query = query.filter_by(target_id=target_id)
+    rows = query.order_by(models.PlaygroundRequest.created_at.desc()).limit(max(1, min(limit, 200))).all()
+    return {"items": [_row_playground_request(row) for row in rows]}
+
+
+@app.post("/api/playground/request")
+def playground_send(req: PlaygroundRequestSend, db: Session = Depends(get_db)):
+    url = _validate_playground_url(req.url)
+    method = req.method.strip().upper() or "GET"
+    headers = {str(k).strip(): str(v) for k, v in (req.headers or {}).items() if str(k).strip()}
+    started = time.monotonic()
+    status_code = None
+    response_headers = {}
+    response_body = ""
+    response_size = 0
+    error = None
+    try:
+        response = pyhttpx.request(
+            method,
+            url,
+            headers=headers,
+            content=req.body.encode("utf-8") if req.body is not None else None,
+            follow_redirects=req.follow_redirects,
+            timeout=req.timeout,
+        )
+        status_code = response.status_code
+        response_headers = dict(response.headers)
+        response_size = len(response.content or b"")
+        response_body = response.text[:PLAYGROUND_BODY_LIMIT]
+    except Exception as exc:
+        error = str(exc)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    payload = {
+        "target_id": req.target_id,
+        "method": method,
+        "url": url,
+        "request_headers": headers,
+        "request_body": req.body or "",
+        "status_code": status_code,
+        "response_headers": response_headers,
+        "response_body": response_body,
+        "response_size": response_size,
+        "duration_ms": duration_ms,
+        "error": error,
+    }
+    row = None
+    if req.save:
+        row = models.PlaygroundRequest(**payload)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return {"item": _row_playground_request(row) if row else {"id": None, **payload}, "truncated": response_size > len(response_body.encode("utf-8"))}
+
+
+@app.patch("/api/playground/history/{request_id}")
+def playground_patch_history(request_id: int, patch: InterestingPatch, db: Session = Depends(get_db)):
+    row = db.get(models.PlaygroundRequest, request_id)
+    if not row:
+        raise HTTPException(404, "playground request not found")
+    row.interesting = patch.interesting
+    row.note = patch.note
+    db.commit()
+    return {"ok": True}
+
+
+def _arjun_executable() -> list[str] | None:
+    venv_arjun = Path("/opt/venv/bin/arjun")
+    if venv_arjun.exists():
+        return [str(venv_arjun)]
+    venv_python = Path("/opt/venv/bin/python")
+    if venv_python.exists():
+        return [str(venv_python), "-m", "arjun"]
+    arjun = shutil.which("arjun")
+    if arjun:
+        return [arjun]
+    python = shutil.which("python") or shutil.which("python3")
+    if python:
+        return [python, "-m", "arjun"]
+    return None
+
+
+@app.post("/api/playground/arjun")
+def playground_arjun(req: PlaygroundToolRequest):
+    url = _validate_playground_url(req.url)
+    exe = _arjun_executable()
+    if not exe:
+        raise HTTPException(501, "Arjun is not available in this container. Rebuild the backend image after installing requirements.")
+    PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=PLAYGROUND_DIR) as td:
+        work = Path(td)
+        infile = work / "arjun-input.txt"
+        outfile = work / "arjun.json"
+        infile.write_text(url + "\n", encoding="utf-8")
+        methods = [m.strip().upper() for m in req.arjun_methods.split(",") if m.strip()] or [req.method.upper()]
+        results = []
+        raw_outputs = []
+        for method in methods:
+            cmd = build_arjun_command(infile, outfile, method, req.arjun_threads, req.arjun_request_timeout, req.headers, req.arjun_stable)
+            cmd = exe + cmd[1:]
+            try:
+                stdout, stderr = run_command(cmd, timeout=req.timeout)
+            except CommandError as exc:
+                stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
+            text = outfile.read_text(errors="ignore") if outfile.exists() else stdout
+            raw_outputs.append({"method": method, "stdout": stdout, "stderr": stderr, "json": text[:PLAYGROUND_BODY_LIMIT]})
+            results.extend(parse_arjun_json(text, f"arjun-{method.lower()}"))
+            if outfile.exists():
+                outfile.unlink()
+        return {"url": url, "parameters": results, "raw": raw_outputs}
+
+
+@app.post("/api/playground/dalfox")
+def playground_dalfox(req: PlaygroundToolRequest):
+    url = _validate_playground_url(req.url)
+    dalfox = shutil.which("dalfox")
+    if not dalfox:
+        raise HTTPException(501, "Dalfox is not available in this container. Rebuild the backend image after adding Dalfox.")
+    cmd = [dalfox, "url", url, "--silence", "--format", "json", "--timeout", str(req.timeout)]
+    if req.dalfox_options:
+        cmd.extend(part for part in req.dalfox_options.split() if part)
+    try:
+        proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=req.timeout + 10)
+    except subprocess.TimeoutExpired as exc:
+        return {"url": url, "ok": False, "error": f"Dalfox timed out after {req.timeout}s.", "stdout": (exc.stdout or "")[:PLAYGROUND_BODY_LIMIT], "stderr": (exc.stderr or "")[:PLAYGROUND_BODY_LIMIT], "findings": []}
+    findings = []
+    try:
+        import json
+        parsed = json.loads(proc.stdout) if proc.stdout.strip() else []
+        findings = parsed if isinstance(parsed, list) else parsed.get("data", []) if isinstance(parsed, dict) else []
+    except Exception:
+        findings = []
+    return {"url": url, "ok": proc.returncode == 0, "returncode": proc.returncode, "findings": findings, "stdout": proc.stdout[:PLAYGROUND_BODY_LIMIT], "stderr": proc.stderr[:PLAYGROUND_BODY_LIMIT]}
 
 @app.get("/api/wordlists")
 def list_wordlists(kind: str | None = None, db: Session = Depends(get_db)):
@@ -191,6 +367,7 @@ def delete_target(target_id: int, db: Session = Depends(get_db)):
         "js": db.query(models.JsFinding).filter_by(target_id=target_id).delete(synchronize_session=False),
         "nuclei": db.query(models.NucleiFinding).filter_by(target_id=target_id).delete(synchronize_session=False),
         "screenshots": db.query(models.Screenshot).filter_by(target_id=target_id).delete(synchronize_session=False),
+        "playground": db.query(models.PlaygroundRequest).filter_by(target_id=target_id).delete(synchronize_session=False),
         "raw": 0,
     }
     if scan_ids:

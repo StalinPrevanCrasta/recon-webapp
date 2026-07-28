@@ -50,6 +50,7 @@ def test_delete_target_removes_target_scans_and_results():
             models.JsFinding(target_id=target.id, scan_id=scan.id, page_url=f"https://api.{domain}", source_url=f"https://api.{domain}/app.js", finding_type="endpoint", severity="low", indicator="/api/users", confidence="pattern", tags=["endpoint"], first_seen_scan_id=scan.id),
             models.Screenshot(target_id=target.id, scan_id=scan.id, url=f"https://api.{domain}", image_path="/data/screenshots/test.png"),
             models.RawOutput(scan_id=scan.id, stage="httpx", tool="httpx", path="/data/raw/httpx.jsonl"),
+            models.PlaygroundRequest(target_id=target.id, method="GET", url=f"https://api.{domain}", request_headers={}, response_headers={}),
         ])
         db.commit()
         target_id = target.id
@@ -61,7 +62,7 @@ def test_delete_target_removes_target_scans_and_results():
     response = client.delete(f"/api/targets/{target_id}")
 
     assert response.status_code == 200
-    assert response.json()["deleted"] == {"targets": 1, "scans": 1, "subdomains": 1, "ports": 1, "http": 1, "dirs": 1, "parameters": 1, "js": 1, "nuclei": 0, "screenshots": 1, "raw": 1}
+    assert response.json()["deleted"] == {"targets": 1, "scans": 1, "subdomains": 1, "ports": 1, "http": 1, "dirs": 1, "parameters": 1, "js": 1, "nuclei": 0, "screenshots": 1, "playground": 1, "raw": 1}
     assert client.get(f"/api/targets/{target_id}/results").status_code == 404
     db = SessionLocal()
     try:
@@ -167,3 +168,37 @@ def test_manual_arjun_endpoint_queues_existing_scan_and_clears_old_arjun_rows(mo
         assert db.query(models.ParameterResult).filter_by(scan_id=scan_id, source="arjun-get").count() == 0
     finally:
         db.close()
+
+
+def test_playground_request_sends_and_saves(monkeypatch):
+    init_db()
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        content = b"hello"
+        text = "hello"
+
+    calls = []
+    monkeypatch.setattr("app.main.pyhttpx.request", lambda *args, **kwargs: calls.append((args, kwargs)) or FakeResponse())
+    response = TestClient(app).post("/api/playground/request", json={
+        "method": "POST",
+        "url": "https://example.com/search?q=1",
+        "headers": {"X-Test": "1"},
+        "body": "name=value",
+        "timeout": 5,
+    })
+
+    assert response.status_code == 200
+    body = response.json()["item"]
+    assert body["status_code"] == 200
+    assert body["response_body"] == "hello"
+    assert calls[0][0][0] == "POST"
+    assert calls[0][0][1] == "https://example.com/search?q=1"
+    assert TestClient(app).get("/api/playground/history").json()["items"][0]["url"] == "https://example.com/search?q=1"
+
+
+def test_playground_rejects_non_http_url():
+    response = TestClient(app).post("/api/playground/request", json={"url": "file:///etc/passwd"})
+
+    assert response.status_code == 422

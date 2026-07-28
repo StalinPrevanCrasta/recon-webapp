@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import './style.css';
 
 const API = '/api';
-const TABS = ['Subdomains', 'Live Hosts', 'Content Paths', 'Vulnerabilities', 'JS Intel', 'Parameters', 'Arjun', 'Screenshots', 'Raw Logs'];
+const TABS = ['Subdomains', 'Live Hosts', 'Content Paths', 'Vulnerabilities', 'JS Intel', 'Parameters', 'Screenshots', 'Raw Logs'];
 const INTERESTING_STATUS_CODES = new Set([200, 204, 301, 302, 401, 403, 500]);
 const DEFAULT_SCAN_OPTS = {
   recursion_depth: 2,
@@ -70,6 +70,18 @@ function loadStoredScanOpts() {
   } catch {
     return DEFAULT_SCAN_OPTS;
   }
+}
+
+function sendToPlayground(row = {}) {
+  const url = row.url || row.source_url || row.matched_at || row.base_url || row.name || '';
+  const seed = {
+    method: row.method || 'GET',
+    url,
+    headers: row.headers_sent || {},
+    body: '',
+  };
+  localStorage.setItem('playground.seed', JSON.stringify(seed));
+  window.open('/playground', '_blank', 'noopener,noreferrer');
 }
 
 async function j(url, options = {}) {
@@ -346,7 +358,7 @@ function Header({domain, setDomain, run, stopScan, result, targets, loadTarget, 
   const activeScan = ['queued', 'running', 'stopping'].includes(scan?.status);
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
-    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" onClick={openTargets}>Targets</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button>{activeScan && <button className="danger" disabled={scan?.status === 'stopping'} onClick={stopScan}>{scan?.status === 'stopping' ? 'Stopping…' : 'Stop scan'}</button>}<button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
+    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" onClick={openTargets}>Targets</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/playground', '_blank', 'noopener,noreferrer')}>Playground</button><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button>{activeScan && <button className="danger" disabled={scan?.status === 'stopping'} onClick={stopScan}>{scan?.status === 'stopping' ? 'Stopping…' : 'Stop scan'}</button>}<button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
   </header>;
 }
 
@@ -425,7 +437,7 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
         <td title={(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div></td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
-        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
+        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => sendToPlayground(row)}>Send</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
       </tr>;
     })}</tbody></table></div>
   </>;
@@ -482,7 +494,7 @@ function DetailsPanel({row, result, close, markInteresting}) {
   const value = row.url || row.source_url || row.matched_at || row.name || row.image_path;
   const cdn = compactTech(row.tech).find(t => /cloudfront|cloudflare|akamai|fastly/i.test(t)) || '—';
   const asn = /amazon|aws|cloudfront|s3/i.test((row.tech || []).join(' ')) ? 'Amazon' : /cloudflare/i.test((row.tech || []).join(' ')) ? 'Cloudflare' : '—';
-  return <aside className="details"><button className="close" onClick={close}>Close</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Nuclei Finding</span>{row.template_id ? <><Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : 'warn'}>{row.severity}</Badge><Badge>{row.template_id}</Badge></> : '—'}</div><div className="detail-row"><span>Template Name</span>{row.template_name || '—'}</div><div className="detail-row"><span>Matcher / Type</span>{[row.matcher_name, row.type].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>JS Finding</span>{row.finding_type ? <><Badge tone={row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge><Badge>{row.finding_type}</Badge></> : '—'}</div><div className="detail-row"><span>Indicator</span>{row.indicator || '—'}</div><div className="detail-row"><span>Location</span>{row.line ? `Line ${row.line}${row.column ? `, column ${row.column}` : ''}` : '—'}</div><div className="detail-row"><span>Page URL</span>{row.page_url || '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || row.matched_at || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div>{row.description && <div className="detail-block"><span>Description</span><pre>{row.description}</pre></div>}{(row.extracted_results || []).length > 0 && <div className="detail-block"><span>Extracted Results</span><pre>{(row.extracted_results || []).join('\n')}</pre></div>}{(row.references || []).length > 0 && <div className="detail-block"><span>References</span><pre>{(row.references || []).join('\n')}</pre></div>}{row.evidence && <div className="detail-block"><span>Evidence</span><pre>{row.evidence}</pre></div>}{row.file_path && <div className="detail-block"><span>Downloaded bundle</span><pre>{row.file_path}</pre></div>}<div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div>{row.raw && <div className="detail-block"><span>Nuclei Raw</span><pre>{JSON.stringify(row.raw || {}, null, 2)}</pre></div>}<div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
+  return <aside className="details"><button className="close" onClick={close}>Close</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Nuclei Finding</span>{row.template_id ? <><Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : 'warn'}>{row.severity}</Badge><Badge>{row.template_id}</Badge></> : '—'}</div><div className="detail-row"><span>Template Name</span>{row.template_name || '—'}</div><div className="detail-row"><span>Matcher / Type</span>{[row.matcher_name, row.type].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>JS Finding</span>{row.finding_type ? <><Badge tone={row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge><Badge>{row.finding_type}</Badge></> : '—'}</div><div className="detail-row"><span>Indicator</span>{row.indicator || '—'}</div><div className="detail-row"><span>Location</span>{row.line ? `Line ${row.line}${row.column ? `, column ${row.column}` : ''}` : '—'}</div><div className="detail-row"><span>Page URL</span>{row.page_url || '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || row.matched_at || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div>{row.description && <div className="detail-block"><span>Description</span><pre>{row.description}</pre></div>}{(row.extracted_results || []).length > 0 && <div className="detail-block"><span>Extracted Results</span><pre>{(row.extracted_results || []).join('\n')}</pre></div>}{(row.references || []).length > 0 && <div className="detail-block"><span>References</span><pre>{(row.references || []).join('\n')}</pre></div>}{row.evidence && <div className="detail-block"><span>Evidence</span><pre>{row.evidence}</pre></div>}{row.file_path && <div className="detail-block"><span>Downloaded bundle</span><pre>{row.file_path}</pre></div>}<div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div>{row.raw && <div className="detail-block"><span>Nuclei Raw</span><pre>{JSON.stringify(row.raw || {}, null, 2)}</pre></div>}<div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button onClick={() => sendToPlayground(row)}>Send to Playground</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
 }
 
 
@@ -549,7 +561,7 @@ function LandingPage({domain, setDomain, run, targets, loadTarget, runDisabled, 
   const examples = ['example.com', 'app.example.com', 'https://target.com'];
   const needsOptions = Boolean(runError);
   return <div className="landing-page">
-    <nav className="landing-nav"><b>Recon Radar</b><div className="landing-actions"><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button></div></nav>
+    <nav className="landing-nav"><b>Recon Radar</b><div className="landing-actions"><button className="secondary" onClick={() => window.open('/playground', '_blank', 'noopener,noreferrer')}>Playground</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button></div></nav>
     <section className="landing-hero">
       <div className="landing-copy"><span className="eyebrow">Attack surface scanner</span><h1>Enter a target. Watch the surface resolve.</h1><p>Start with one domain and move into a focused scan workspace for subdomains, live hosts, content paths, vulnerabilities, screenshots, and raw output.</p></div>
       <form className="target-launcher" onSubmit={e => { e.preventDefault(); if (!runDisabled) run(); }}>
@@ -561,6 +573,93 @@ function LandingPage({domain, setDomain, run, targets, loadTarget, runDisabled, 
       </form>
     </section>
     <section className="landing-recents"><div><h2>Recent targets</h2><p>Select a previous target to open its scan workspace.</p></div><div className="recent-grid">{targets.slice(0, 8).map(t => <button key={t.id} onClick={() => loadTarget(t)}><b>{t.domain}</b><span>{t.scan_count} scans</span></button>)}{!targets.length && <p className="muted">No targets yet. Your first scan will appear here.</p>}</div></section>
+  </div>;
+}
+
+function headerLinesToObject(text) {
+  return Object.fromEntries((text || '').split('\n').map(line => {
+    const [key, ...value] = line.split(':');
+    return [key.trim(), value.join(':').trim()];
+  }).filter(([key]) => key));
+}
+
+function objectToHeaderLines(headers = {}) {
+  return Object.entries(headers || {}).map(([key, value]) => `${key}: ${value}`).join('\n');
+}
+
+function PlaygroundPage() {
+  const seed = useMemo(() => {
+    try { return JSON.parse(localStorage.getItem('playground.seed') || '{}'); } catch { return {}; }
+  }, []);
+  const [method, setMethod] = useState(seed.method || 'GET');
+  const [url, setUrl] = useState(seed.url || '');
+  const [headers, setHeaders] = useState(objectToHeaderLines(seed.headers || {}));
+  const [body, setBody] = useState(seed.body || '');
+  const [timeout, setTimeoutValue] = useState(20);
+  const [response, setResponse] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [toolResult, setToolResult] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [alert, setAlert] = useState('');
+
+  const refreshHistory = useCallback(() => j(`${API}/playground/history?limit=40`).then(r => setHistory(r.items || [])).catch(() => {}), []);
+  useEffect(() => { refreshHistory(); }, [refreshHistory]);
+  useEffect(() => {
+    if (seed.url) localStorage.removeItem('playground.seed');
+  }, [seed.url]);
+
+  async function send(save = true) {
+    setAlert(''); setBusy('request');
+    try {
+      const payload = {method, url, headers: headerLinesToObject(headers), body, timeout: Number(timeout) || 20, save};
+      const res = await j(`${API}/playground/request`, {method: 'POST', body: JSON.stringify(payload)});
+      setResponse(res.item);
+      await refreshHistory();
+    } catch (err) {
+      setAlert(err.message || String(err));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function loadItem(item) {
+    setMethod(item.method || 'GET');
+    setUrl(item.url || '');
+    setHeaders(objectToHeaderLines(item.request_headers || {}));
+    setBody(item.request_body || '');
+    setResponse(item);
+  }
+
+  async function runTool(tool) {
+    setAlert(''); setBusy(tool); setToolResult(null);
+    try {
+      const payload = {method, url, headers: headerLinesToObject(headers), body, timeout: tool === 'dalfox' ? 180 : 120, arjun_methods: method};
+      setToolResult({tool, ...(await j(`${API}/playground/${tool}`, {method: 'POST', body: JSON.stringify(payload)}))});
+    } catch (err) {
+      setToolResult({tool, error: err.message || String(err)});
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const statusTone = response?.error ? 'server' : response?.status_code ? statusClass(response.status_code) : 'muted';
+  return <div className="playground-page">
+    <header className="playground-header"><div className="brand"><h1>Playground</h1><div className="header-meta"><Badge tone="redirect">Repeater</Badge><span>Manual request testing and focused tools</span></div></div><div className="runbox"><button className="secondary" onClick={() => window.location.href = '/'}>Dashboard</button><button className="secondary" onClick={refreshHistory}>Refresh history</button></div></header>
+    {alert && <div className="alert">{alert}</div>}
+    <main className="playground-layout">
+      <section className="playground-compose">
+        <div className="playground-urlbar"><select value={method} onChange={e => setMethod(e.target.value)}>{['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(m => <option key={m}>{m}</option>)}</select><input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://target/path?param=value"/><button className="primary" disabled={!url || busy === 'request'} onClick={() => send(true)}>{busy === 'request' ? 'Sending...' : 'Send'}</button></div>
+        <div className="playground-editors"><label>Headers<textarea value={headers} onChange={e => setHeaders(e.target.value)} placeholder="Header: value"/></label><label>Body<textarea value={body} onChange={e => setBody(e.target.value)} placeholder="Raw request body"/></label></div>
+        <div className="playground-actions"><label>Timeout <input type="number" min="1" max="120" value={timeout} onChange={e => setTimeoutValue(e.target.value)}/></label><button onClick={() => navigator.clipboard?.writeText(`curl -i -X ${method} ${headers ? objectToHeaderLines(headerLinesToObject(headers)).split('\n').map(h => `-H "${h}"`).join(' ') : ''} ${body ? `--data ${JSON.stringify(body)}` : ''} "${url}"`)}>Copy curl</button><button onClick={() => runTool('arjun')} disabled={!url || Boolean(busy)}>{busy === 'arjun' ? 'Arjun...' : 'Run Arjun'}</button><button onClick={() => runTool('dalfox')} disabled={!url || Boolean(busy)}>{busy === 'dalfox' ? 'Dalfox...' : 'Run Dalfox'}</button></div>
+      </section>
+      <section className="playground-response">
+        <div className="panel-title"><span>Response</span>{response && <><Badge tone={statusTone}>{response.error ? 'error' : response.status_code || 'sent'}</Badge><em>{response.duration_ms || 0} ms</em><em>{response.response_size || 0} B</em></>}</div>
+        {response?.error && <div className="inline-alert">{response.error}</div>}
+        <div className="response-tabs"><div><b>Headers</b><pre>{JSON.stringify(response?.response_headers || {}, null, 2)}</pre></div><div><b>Body</b><pre>{response?.response_body || 'No response yet.'}</pre></div></div>
+        <div className="tool-output"><b>Tool Output</b><pre>{toolResult ? JSON.stringify(toolResult, null, 2) : 'Run Arjun or Dalfox on the current request.'}</pre></div>
+      </section>
+      <aside className="playground-history"><h2>History</h2>{history.length ? history.map(item => <button key={item.id} onClick={() => loadItem(item)}><b>{item.method} {hostFromUrl(item.url)}</b><span>{item.status_code || item.error || 'sent'} · {ago(item.created_at)}</span><small>{item.url}</small></button>) : <p className="muted">No requests yet.</p>}</aside>
+    </main>
   </div>;
 }
 
@@ -792,4 +891,4 @@ function App() {
   <TargetLoadingScreen target={loadingTarget}/></>;
 }
 
-createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : <App/>);
+createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : window.location.pathname === '/playground' ? <PlaygroundPage/> : <App/>);

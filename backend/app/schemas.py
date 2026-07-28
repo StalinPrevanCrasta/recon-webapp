@@ -157,3 +157,27 @@ class ArjunRunRequest(BaseModel):
     arjun_threads: int = Field(default=5, ge=1, le=20)
     arjun_request_timeout: int = Field(default=10, ge=3, le=60)
     arjun_stable: bool = True
+
+
+class PlaygroundRequestSend(BaseModel):
+    target_id: int | None = None
+    method: str = "GET"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    timeout: int = Field(default=20, ge=1, le=120)
+    follow_redirects: bool = True
+    save: bool = True
+
+
+class PlaygroundToolRequest(BaseModel):
+    method: str = "GET"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    timeout: int = Field(default=120, ge=5, le=600)
+    arjun_methods: str = "GET"
+    arjun_threads: int = Field(default=5, ge=1, le=20)
+    arjun_request_timeout: int = Field(default=10, ge=3, le=60)
+    arjun_stable: bool = True
+    dalfox_options: str = ""

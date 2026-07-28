@@ -181,6 +181,33 @@ def _sqlite_add_missing_columns() -> None:
             conn.execute(text("CREATE INDEX ix_nuclei_findings_ip ON nuclei_findings (ip)"))
             conn.execute(text("CREATE INDEX ix_nuclei_findings_type ON nuclei_findings (type)"))
             conn.execute(text("CREATE INDEX ix_nuclei_findings_first_seen_scan_id ON nuclei_findings (first_seen_scan_id)"))
+        if "playground_requests" not in tables:
+            conn.execute(text("""
+                CREATE TABLE playground_requests (
+                    id INTEGER NOT NULL,
+                    target_id INTEGER,
+                    method VARCHAR(16) DEFAULT 'GET' NOT NULL,
+                    url VARCHAR(2048) NOT NULL,
+                    request_headers JSON DEFAULT '{}' NOT NULL,
+                    request_body TEXT,
+                    status_code INTEGER,
+                    response_headers JSON DEFAULT '{}' NOT NULL,
+                    response_body TEXT,
+                    response_size INTEGER,
+                    duration_ms INTEGER,
+                    error TEXT,
+                    interesting BOOLEAN DEFAULT 0 NOT NULL,
+                    note TEXT,
+                    created_at DATETIME,
+                    PRIMARY KEY (id),
+                    FOREIGN KEY(target_id) REFERENCES targets (id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX ix_playground_requests_target_id ON playground_requests (target_id)"))
+            conn.execute(text("CREATE INDEX ix_playground_requests_method ON playground_requests (method)"))
+            conn.execute(text("CREATE INDEX ix_playground_requests_url ON playground_requests (url)"))
+            conn.execute(text("CREATE INDEX ix_playground_requests_status_code ON playground_requests (status_code)"))
+            conn.execute(text("CREATE INDEX ix_playground_requests_created_at ON playground_requests (created_at)"))
 
 
 def init_db() -> None:
