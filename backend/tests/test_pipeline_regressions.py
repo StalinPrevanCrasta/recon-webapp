@@ -490,7 +490,7 @@ def test_execute_scan_finishes_partial_and_still_runs_screenshots_when_ffuf_has_
     try:
         pipeline.execute_scan(db, scan_id)
         row = db.get(models.Scan, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "ffuf", "nuclei", "parameters", "screenshots"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "ffuf", "parameters", "screenshots"]
         assert row.status == "partial"
         assert row.stage == "partial"
         assert "FFUF had 1 host failure" in row.error
@@ -514,7 +514,7 @@ def test_execute_scan_always_runs_wappalyzer_after_httpx(monkeypatch):
     db = SessionLocal()
     try:
         pipeline.execute_scan(db, scan_id)
-        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "nuclei", "parameters"]
+        assert events == ["subdomains", "naabu", "httpx", "wappalyzer", "js_intel", "parameters"]
     finally:
         db.close()
 
@@ -651,6 +651,27 @@ def test_run_nuclei_light_mode_skips_content_paths_by_default(monkeypatch, tmp_p
     monkeypatch.setattr(pipeline, "run_command", fake_run_command)
     try:
         stats = pipeline.run_nuclei(db, scan)
+        assert stats["input_urls"] == 1
+    finally:
+        db.close()
+
+
+def test_run_nuclei_with_selected_urls_scans_only_selected(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"nuclei_max_urls": 10})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://app.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://admin.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+
+    def fake_run_command(cmd, timeout=None):
+        infile = Path(cmd[cmd.index("-l") + 1])
+        assert infile.read_text(encoding="utf-8").splitlines() == ["https://admin.example"]
+        Path(cmd[cmd.index("-o") + 1]).write_text("", encoding="utf-8")
+        return "", ""
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_nuclei(db, scan, ["https://admin.example"])
         assert stats["input_urls"] == 1
     finally:
         db.close()

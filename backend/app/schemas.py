@@ -48,7 +48,7 @@ class RunScanRequest(BaseModel):
     js_intel_timeout: int = Field(default=180, ge=30, le=1800)
     trufflehog_results: str = "verified,unknown,unverified"
     trufflehog_concurrency: int = Field(default=4, ge=1, le=32)
-    run_nuclei: bool = True
+    run_nuclei: bool = False
     nuclei_profile: str = "light"
     nuclei_severity: str = "high,critical"
     nuclei_tags: str = "exposure,takeover"
@@ -116,7 +116,7 @@ class StageRerunRequest(BaseModel):
     js_intel_timeout: int = 180
     trufflehog_results: str = "verified,unknown,unverified"
     trufflehog_concurrency: int = 4
-    run_nuclei: bool = True
+    run_nuclei: bool = False
     nuclei_profile: str = "light"
     nuclei_severity: str = "high,critical"
     nuclei_tags: str = "exposure,takeover"

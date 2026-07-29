@@ -1109,6 +1109,7 @@ def _nuclei_input_urls(db: Session, scan: models.Scan, urls: list[str] | None = 
     if urls:
         for url in urls:
             add(url)
+        return ordered[:max_urls]
 
     http_query = db.query(models.HttpxResult.url).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code < 500)
     for row in http_query.order_by(models.HttpxResult.status_code.asc()).all():
@@ -1620,7 +1621,7 @@ def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> No
             ffuf_stats = run_ffuf(db, scan, urls)
             ensure_scan_not_stopped(db, scan)
 
-        if (scan.config or {}).get("run_nuclei", True) and stage_only in (None, "nuclei"):
+        if (scan.config or {}).get("run_nuclei", False) and stage_only in (None, "nuclei"):
             ensure_scan_not_stopped(db, scan)
             set_scan(db, scan, "nuclei", 76)
             nuclei_stats = run_nuclei(db, scan, urls)

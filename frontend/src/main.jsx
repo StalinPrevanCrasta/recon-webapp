@@ -33,7 +33,7 @@ const DEFAULT_SCAN_OPTS = {
   js_intel_timeout: 180,
   trufflehog_results: 'verified,unknown,unverified',
   trufflehog_concurrency: 4,
-  run_nuclei: true,
+  run_nuclei: false,
   nuclei_profile: 'light',
   nuclei_severity: 'high,critical',
   nuclei_tags: 'exposure,takeover',
@@ -66,7 +66,12 @@ const DEFAULT_SCAN_OPTS = {
 
 function loadStoredScanOpts() {
   try {
-    return {...DEFAULT_SCAN_OPTS, ...JSON.parse(localStorage.getItem('scan.options') || '{}')};
+    const stored = JSON.parse(localStorage.getItem('scan.options') || '{}');
+    if (localStorage.getItem('nuclei.manualDefault.v1') !== 'true') {
+      stored.run_nuclei = false;
+      localStorage.setItem('nuclei.manualDefault.v1', 'true');
+    }
+    return {...DEFAULT_SCAN_OPTS, ...stored};
   } catch {
     return DEFAULT_SCAN_OPTS;
   }
@@ -82,6 +87,10 @@ function sendToPlayground(row = {}) {
   };
   localStorage.setItem('playground.seed', JSON.stringify(seed));
   window.open('/playground', '_blank', 'noopener,noreferrer');
+}
+
+function nucleiUrlForRow(row = {}) {
+  return row.url || row.source_url || row.page_url || row.base_url || row.matched_at || '';
 }
 
 async function j(url, options = {}) {
@@ -416,7 +425,7 @@ function applyFilters(rows, filters) {
   });
 }
 
-function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInteresting}) {
+function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInteresting, runNucleiOnRows}) {
   const [filters, setFilters] = useState({q: '', host: '', status: '', title: '', tech: '', ip: '', source: '', tags: '', confidence: '', chips: []});
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -442,7 +451,7 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
         <td title={jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div>{row.finding_type && <div className="subtext">{row.finding_type}</div>}</td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
-        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => sendToPlayground(row)}>Send</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
+        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => sendToPlayground(row)}>Send</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run Nuclei on this row" disabled={!runNucleiOnRows || !nucleiUrlForRow(row)} onClick={() => runNucleiOnRows([row])}>Nuclei</button></td>
       </tr>;
     })}</tbody></table></div>
   </>;
@@ -1012,6 +1021,40 @@ function App() {
       setAlert(err.message || String(err));
     }
   }
+  async function runNucleiOnRows(rows) {
+    const parentScanId = result?.active_scan?.id || scan?.id;
+    const urls = [...new Set((rows || []).map(nucleiUrlForRow).filter(Boolean))];
+    if (!parentScanId || !urls.length) return;
+    setAlert('');
+    try {
+      const payload = {
+        stage: 'nuclei',
+        subset_urls: urls,
+        run_nuclei: true,
+        nuclei_profile: opts.nuclei_profile || 'light',
+        nuclei_severity: opts.nuclei_severity || 'high,critical',
+        nuclei_tags: opts.nuclei_tags || 'exposure,takeover',
+        nuclei_exclude_tags: opts.nuclei_exclude_tags || 'dos,fuzz,intrusive,brute-force,bruteforce,slow',
+        nuclei_types: opts.nuclei_types || 'http',
+        nuclei_templates: opts.nuclei_templates || '',
+        nuclei_concurrency: Number(opts.nuclei_concurrency) || 10,
+        nuclei_rate_limit: Number(opts.nuclei_rate_limit) || 25,
+        nuclei_timeout: Number(opts.nuclei_timeout) || 4,
+        nuclei_retries: Number(opts.nuclei_retries) || 0,
+        nuclei_stage_timeout: Number(opts.nuclei_stage_timeout) || 300,
+        nuclei_max_urls: urls.length,
+        nuclei_no_interactsh: opts.nuclei_no_interactsh !== false,
+        nuclei_include_content_paths: false,
+      };
+      const res = await j(`${API}/scans/${parentScanId}/rerun`, {method: 'POST', body: JSON.stringify(payload)});
+      setScan({id: res.scan_id, status: 'queued', stage: 'queued:nuclei'});
+      setSelectedIds(new Set());
+      setAlert(`Queued focused Nuclei for ${urls.length} selected URL${urls.length === 1 ? '' : 's'}.`);
+      await refresh(active?.id);
+    } catch (err) {
+      setAlert(err.message || String(err));
+    }
+  }
   async function upload(kind, file) { if (!file) return; setAlert(''); try { const fd = new FormData(); fd.append('file', file); await j(`${API}/wordlists/${kind}`, {method: 'POST', body: fd}); await refresh(); } catch (err) { setAlert(err.message || String(err)); } }
   async function saveSettings() { setAlert(''); try { const body = {...settings, headers: Object.fromEntries((settings.headerLines || '').split('\n').filter(Boolean).map(l => { const [k, ...v] = l.split(':'); return [k.trim(), v.join(':').trim()]; }))}; delete body.headerLines; setSettings(await j(`${API}/settings`, {method: 'PUT', body: JSON.stringify(body)})); } catch (err) { setAlert(err.message || String(err)); } }
   async function markInteresting(kind, row) { await j(`${API}/${kind}/${row.id}/interesting`, {method: 'PATCH', body: JSON.stringify({interesting: !row.interesting, note: row.note || '', tag: row.tag || ''})}); await refresh(); }
@@ -1027,6 +1070,9 @@ function App() {
   const parameterRows = result?.parameters || [];
   const arjunRows = result?.arjun || [];
   const selectedParameterUrls = [...new Set(parameterRows.filter(r => selectedIds.has(r.id)).map(r => r.source_url || r.base_url).filter(Boolean))];
+  const nucleiCandidateRows = tab === 'Live Hosts' ? httpRows : tab === 'Content Paths' ? dirRows : tab === 'JS Intel' ? jsRows : tab === 'Parameters' ? parameterRows : tab === 'Arjun' ? arjunRows : [];
+  const selectedNucleiRows = nucleiCandidateRows.filter(r => selectedIds.has(r.id) && nucleiUrlForRow(r));
+  const showNucleiAction = ['Live Hosts', 'Content Paths', 'JS Intel', 'Parameters', 'Arjun'].includes(tab);
   const scanStatus = result?.active_scan || scan;
   const scanRunning = ['queued', 'running', 'stopping'].includes(scanStatus?.status);
   const defaultFfuf = health?.ffuf;
@@ -1042,7 +1088,7 @@ function App() {
     <SidebarGroup title="Request Settings">{settings && <><input value={settings.user_agent || ''} onChange={e => setSettings({...settings, user_agent: e.target.value})} placeholder="User-Agent"/><input value={settings.proxy || ''} onChange={e => setSettings({...settings, proxy: e.target.value})} placeholder="Proxy"/><textarea placeholder="Header: value per line" value={settings.headerLines ?? Object.entries(settings.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n')} onChange={e => setSettings({...settings, headerLines: e.target.value})}/><button onClick={saveSettings}>Save settings</button></>}</SidebarGroup>
     <SidebarGroup title="Port & Fingerprint"><label><input type="checkbox" checked={opts.run_naabu} onChange={e => setOpts({...opts, run_naabu: e.target.checked})}/> Run Naabu web-port discovery</label><input placeholder="naabu ports" value={opts.naabu_ports} onChange={e => setOpts({...opts, naabu_ports: e.target.value})}/><div className="option-stack always-on"><span className="setting-label">Wappalyzer fingerprinting</span><Badge tone="ok">Always on after httpx</Badge><select value={opts.wappalyzer_scan_type} onChange={e => setOpts({...opts, wappalyzer_scan_type: e.target.value})}><option value="balanced">Balanced</option><option value="fast">Fast</option><option value="full">Full browser mode</option></select><input placeholder="wappalyzer workers" value={opts.wappalyzer_workers} onChange={e => setOpts({...opts, wappalyzer_workers: Number(e.target.value) || 1})}/><p className="hint">Mandatory stage: Wappalyzer runs after httpx on all live hosts before tech-specific FFUF.</p></div></SidebarGroup>
     <SidebarGroup title="FFUF Options"><label><input type="checkbox" checked={opts.run_ffuf} onChange={e => setOpts({...opts, run_ffuf: e.target.checked})}/> Run directory discovery</label><select value={opts.ffuf_mode} onChange={e => setOpts({...opts, ffuf_mode: e.target.value})}><option value="tech">Tech-specific only</option><option value="combined">Tech-specific + generic</option><option value="generic">Generic only</option></select>{runError && <p className="inline-alert">{runError}</p>}<input placeholder="extensions php,txt" onChange={e => setOpts({...opts, extensions: e.target.value})}/><input placeholder="match codes" value={opts.ffuf_match_codes} onChange={e => setOpts({...opts, ffuf_match_codes: e.target.value})}/><input placeholder="host timeout seconds" value={opts.ffuf_host_timeout} onChange={e => setOpts({...opts, ffuf_host_timeout: e.target.value})}/><label><input type="checkbox" checked={opts.ffuf_auto_calibration} onChange={e => setOpts({...opts, ffuf_auto_calibration: e.target.checked})}/> Auto calibration (-ac)</label><label><input type="checkbox" checked={opts.ffuf_recursive} onChange={e => setOpts({...opts, ffuf_recursive: e.target.checked})}/> Recursive</label><p className="hint">Tech-specific mode uses small focused wordlists based on fingerprints and response headers.</p></SidebarGroup>
-    <SidebarGroup title="Nuclei"><div className="option-stack"><span className="setting-label">Template scan</span><label><input type="checkbox" checked={opts.run_nuclei} onChange={e => setOpts({...opts, run_nuclei: e.target.checked})}/> Run Nuclei</label><select value={opts.nuclei_profile} onChange={e => setOpts({...opts, nuclei_profile: e.target.value})}><option value="light">Light and fast</option><option value="balanced">Balanced</option><option value="full">Full selected severities</option></select><label><input type="checkbox" checked={opts.nuclei_no_interactsh} onChange={e => setOpts({...opts, nuclei_no_interactsh: e.target.checked})}/> Disable Interactsh/OAST checks</label><label><input type="checkbox" checked={opts.nuclei_include_content_paths} onChange={e => setOpts({...opts, nuclei_include_content_paths: e.target.checked})}/> Include discovered content paths</label><input placeholder="severity high,critical" value={opts.nuclei_severity} onChange={e => setOpts({...opts, nuclei_severity: e.target.value || 'high,critical'})}/><input placeholder="include tags exposure,takeover" value={opts.nuclei_tags} onChange={e => setOpts({...opts, nuclei_tags: e.target.value})}/><input placeholder="protocol types http" value={opts.nuclei_types} onChange={e => setOpts({...opts, nuclei_types: e.target.value})}/><input placeholder="exclude tags dos,fuzz,intrusive" value={opts.nuclei_exclude_tags} onChange={e => setOpts({...opts, nuclei_exclude_tags: e.target.value})}/><input placeholder="specific templates or ids, comma-separated" value={opts.nuclei_templates} onChange={e => setOpts({...opts, nuclei_templates: e.target.value})}/><input placeholder="concurrency" value={opts.nuclei_concurrency} onChange={e => setOpts({...opts, nuclei_concurrency: Number(e.target.value) || 10})}/><input placeholder="rate limit req/s" value={opts.nuclei_rate_limit} onChange={e => setOpts({...opts, nuclei_rate_limit: Number(e.target.value) || 25})}/><input placeholder="request timeout seconds" value={opts.nuclei_timeout} onChange={e => setOpts({...opts, nuclei_timeout: Number(e.target.value) || 4})}/><input placeholder="retries" value={opts.nuclei_retries} onChange={e => setOpts({...opts, nuclei_retries: Number(e.target.value) || 0})}/><input placeholder="stage timeout seconds" value={opts.nuclei_stage_timeout} onChange={e => setOpts({...opts, nuclei_stage_timeout: Number(e.target.value) || 300})}/><input placeholder="max URLs" value={opts.nuclei_max_urls} onChange={e => setOpts({...opts, nuclei_max_urls: Number(e.target.value) || 25})}/><p className="hint">Light mode scans base live URLs only by default and times out as partial instead of failing the whole scan.</p></div></SidebarGroup>
+    <SidebarGroup title="Nuclei"><div className="option-stack"><span className="setting-label">Focused template scan</span><label><input type="checkbox" checked={opts.run_nuclei} onChange={e => setOpts({...opts, run_nuclei: e.target.checked})}/> Include Nuclei in full scans</label><select value={opts.nuclei_profile} onChange={e => setOpts({...opts, nuclei_profile: e.target.value})}><option value="light">Light and fast</option><option value="balanced">Balanced</option><option value="full">Full selected severities</option></select><label><input type="checkbox" checked={opts.nuclei_no_interactsh} onChange={e => setOpts({...opts, nuclei_no_interactsh: e.target.checked})}/> Disable Interactsh/OAST checks</label><label><input type="checkbox" checked={opts.nuclei_include_content_paths} onChange={e => setOpts({...opts, nuclei_include_content_paths: e.target.checked})}/> Include discovered content paths in full scans</label><input placeholder="severity high,critical" value={opts.nuclei_severity} onChange={e => setOpts({...opts, nuclei_severity: e.target.value || 'high,critical'})}/><input placeholder="include tags exposure,takeover" value={opts.nuclei_tags} onChange={e => setOpts({...opts, nuclei_tags: e.target.value})}/><input placeholder="protocol types http" value={opts.nuclei_types} onChange={e => setOpts({...opts, nuclei_types: e.target.value})}/><input placeholder="exclude tags dos,fuzz,intrusive" value={opts.nuclei_exclude_tags} onChange={e => setOpts({...opts, nuclei_exclude_tags: e.target.value})}/><input placeholder="specific templates or ids, comma-separated" value={opts.nuclei_templates} onChange={e => setOpts({...opts, nuclei_templates: e.target.value})}/><input placeholder="concurrency" value={opts.nuclei_concurrency} onChange={e => setOpts({...opts, nuclei_concurrency: Number(e.target.value) || 10})}/><input placeholder="rate limit req/s" value={opts.nuclei_rate_limit} onChange={e => setOpts({...opts, nuclei_rate_limit: Number(e.target.value) || 25})}/><input placeholder="request timeout seconds" value={opts.nuclei_timeout} onChange={e => setOpts({...opts, nuclei_timeout: Number(e.target.value) || 4})}/><input placeholder="retries" value={opts.nuclei_retries} onChange={e => setOpts({...opts, nuclei_retries: Number(e.target.value) || 0})}/><input placeholder="stage timeout seconds" value={opts.nuclei_stage_timeout} onChange={e => setOpts({...opts, nuclei_stage_timeout: Number(e.target.value) || 300})}/><input placeholder="max URLs for full scans" value={opts.nuclei_max_urls} onChange={e => setOpts({...opts, nuclei_max_urls: Number(e.target.value) || 25})}/><p className="hint">Default full scans keep Nuclei off. Select rows in Live Hosts, Content Paths, JS Intel, Parameters, or Arjun and run focused Nuclei when needed.</p></div></SidebarGroup>
     <SidebarGroup title="JS Intel"><div className="option-stack always-on"><span className="setting-label">JavaScript + TruffleHog</span><Badge tone="ok">Always on</Badge><input placeholder="max live hosts" value={opts.js_intel_max_hosts} onChange={e => setOpts({...opts, js_intel_max_hosts: Number(e.target.value) || 80})}/><input placeholder="max scripts per host" value={opts.js_intel_max_scripts_per_host} onChange={e => setOpts({...opts, js_intel_max_scripts_per_host: Number(e.target.value) || 25})}/><input placeholder="max bytes per file" value={opts.js_intel_max_bytes} onChange={e => setOpts({...opts, js_intel_max_bytes: Number(e.target.value) || 2000000})}/><input placeholder="stage timeout seconds" value={opts.js_intel_timeout} onChange={e => setOpts({...opts, js_intel_timeout: Number(e.target.value) || 180})}/><input placeholder="TruffleHog results verified,unknown,unverified" value={opts.trufflehog_results} onChange={e => setOpts({...opts, trufflehog_results: e.target.value || 'verified,unknown,unverified'})}/><input placeholder="TruffleHog concurrency" value={opts.trufflehog_concurrency} onChange={e => setOpts({...opts, trufflehog_concurrency: Number(e.target.value) || 4})}/><p className="hint">Always downloads/analyzes JS bundles, then runs TruffleHog filesystem secret scanning on those bundles.</p></div></SidebarGroup>
     <SidebarGroup title="Parameter Discovery"><label><input type="checkbox" checked={opts.run_parameters} onChange={e => setOpts({...opts, run_parameters: e.target.checked})}/> Run gau + Katana parameter discovery</label><input placeholder="katana depth" value={opts.katana_depth} onChange={e => setOpts({...opts, katana_depth: Number(e.target.value) || 2})}/><input placeholder="katana crawl duration (2m)" value={opts.katana_crawl_duration} onChange={e => setOpts({...opts, katana_crawl_duration: e.target.value || '2m'})}/><input placeholder="parameter timeout seconds" value={opts.parameter_timeout} onChange={e => setOpts({...opts, parameter_timeout: Number(e.target.value) || 240})}/><label><input type="checkbox" checked={opts.run_katana_headless} onChange={e => setOpts({...opts, run_katana_headless: e.target.checked})}/> Katana headless crawl</label><p className="hint">Extracts GET/POST parameters from gau and bounded Katana crawling only. Arjun runs as a separate stage.</p></SidebarGroup>
     <SidebarGroup title="Arjun Options"><input placeholder="methods GET or GET,POST" value={opts.arjun_methods} onChange={e => setOpts({...opts, arjun_methods: e.target.value || 'GET'})}/><input placeholder="arjun total timeout seconds" value={opts.arjun_timeout} onChange={e => setOpts({...opts, arjun_timeout: Number(e.target.value) || 240})}/><input placeholder="arjun threads" value={opts.arjun_threads} onChange={e => setOpts({...opts, arjun_threads: Number(e.target.value) || 5})}/><input placeholder="arjun request timeout seconds" value={opts.arjun_request_timeout} onChange={e => setOpts({...opts, arjun_request_timeout: Number(e.target.value) || 10})}/><label><input type="checkbox" checked={opts.arjun_stable} onChange={e => setOpts({...opts, arjun_stable: e.target.checked})}/> Prefer stability over speed</label><p className="hint">Arjun is manual-only. Select URLs on the Arjun page and run it when you want hidden parameter probing.</p></SidebarGroup>
@@ -1056,13 +1102,14 @@ function App() {
     <Header domain={domain} setDomain={setDomain} run={run} stopScan={stopScan} result={result} targets={targets} loadTarget={loadTarget} runDisabled={runDisabled} runError={runError} openTargets={() => setTargetDrawerOpen(true)} openSettings={() => setSettingsDrawerOpen(true)}/>{alert && <div className="alert">{alert}</div>}
     <main className="layout">
     <section className="workspace"><SummaryCards result={result}/><ProgressPanel scan={scanStatus} result={result}/><div className="tabs">{TABS.map(t => <button className={tab === t ? 'sel' : ''} onClick={() => setTab(t)} key={t}>{t} <span>{t === 'Subdomains' ? subdomainRows.length : t === 'Live Hosts' ? httpRows.length : t === 'Content Paths' ? dirRows.length : t === 'Vulnerabilities' ? nucleiRows.length : t === 'JS Intel' ? jsRows.length : t === 'Parameters' ? parameterRows.length : t === 'Arjun' ? arjunRows.length : t === 'Screenshots' ? (result?.screenshots || []).length : (result?.raw || []).length}</span></button>)}<div className="export-buttons"><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=json`, '_blank')}>Export JSON</button><button onClick={() => active && window.open(`${API}/targets/${active.id}/export?format=csv`, '_blank')}>Export CSV</button></div></div>
+      {showNucleiAction && <div className="bulkbar action-strip focused-run-card"><span>{selectedNucleiRows.length} selected URL{selectedNucleiRows.length === 1 ? '' : 's'} ready for focused Nuclei</span><button className="primary" disabled={!selectedNucleiRows.length || scanRunning} onClick={() => runNucleiOnRows(selectedNucleiRows)}>Run Nuclei on selected</button><span className="muted">Uses safe excludes and stores findings under Vulnerabilities with raw output.</span></div>}
       {tab === 'Subdomains' && <AssetTable rows={subdomainRows} kind="subdomains" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
-      {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>}
-      {tab === 'Content Paths' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
+      {tab === 'Live Hosts' && <><h3>200 OK</h3><AssetTable rows={http200} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/><h3>Other Status Codes</h3><AssetTable rows={httpOther} kind="http" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/></>}
+      {tab === 'Content Paths' && <AssetTable rows={dirRows} kind="dirs" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/>}
       {tab === 'Vulnerabilities' && <AssetTable rows={nucleiRows} kind="nuclei_findings" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
-      {tab === 'JS Intel' && <AssetTable rows={jsRows} kind="js_findings" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
-      {tab === 'Parameters' && <AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/>}
-      {tab === 'Arjun' && <><div className="bulkbar action-strip"><span>{selectedParameterUrls.length} selected URL{selectedParameterUrls.length === 1 ? '' : 's'} ready for Arjun</span><button className="primary" disabled={!selectedParameterUrls.length || scanRunning} onClick={runArjunOnSelectedParameters}>Run Arjun on selected URLs</button><span className="muted">Select candidate URLs below; results appear in the Arjun Results table.</span></div><h3>Candidate URLs from Parameter Discovery</h3><AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/><h3>Arjun Results</h3><AssetTable rows={arjunRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting}/></>}
+      {tab === 'JS Intel' && <AssetTable rows={jsRows} kind="js_findings" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/>}
+      {tab === 'Parameters' && <AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/>}
+      {tab === 'Arjun' && <><div className="bulkbar action-strip"><span>{selectedParameterUrls.length} selected URL{selectedParameterUrls.length === 1 ? '' : 's'} ready for Arjun</span><button className="primary" disabled={!selectedParameterUrls.length || scanRunning} onClick={runArjunOnSelectedParameters}>Run Arjun on selected URLs</button><span className="muted">Select candidate URLs below; results appear in the Arjun Results table.</span></div><h3>Candidate URLs from Parameter Discovery</h3><AssetTable rows={parameterRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/><h3>Arjun Results</h3><AssetTable rows={arjunRows} kind="parameters" selectRow={setDetail} selectedIds={selectedIds} toggleSelected={toggleSelected} markInteresting={markInteresting} runNucleiOnRows={runNucleiOnRows}/></>}
       {tab === 'Screenshots' && <ScreenshotGallery rows={result?.screenshots || []} selectRow={setDetail} markInteresting={markInteresting}/>}
       {tab === 'Raw Logs' && <RawConsole rows={result?.raw || []}/>}
     </section></main>
