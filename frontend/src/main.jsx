@@ -214,6 +214,11 @@ function tagsFor(row) {
   return tags;
 }
 
+function jsFinder(row) {
+  if (!row?.finding_type) return '';
+  return row.finder || ((row.tags || []).includes('trufflehog') || String(row.finding_type).startsWith('trufflehog') ? 'TruffleHog' : 'Custom JS analyzer');
+}
+
 function Badge({children, tone = 'muted'}) {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
@@ -424,7 +429,7 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
   return <>
     <Filters filters={filters} setFilters={setFilters}/>
     <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.source_url || r.name || r.matched_at).filter(Boolean).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
-    <div className="table-wrap"><table className="asset-table"><colgroup><col className="col-select"/><col className="col-host"/><col className="col-status"/><col className="col-title"/><col className="col-ip"/><col className="col-tech"/><col className="col-source"/><col className="col-tags"/><col className="col-confidence"/><col className="col-actions"/></colgroup><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
+    <div className="table-wrap"><table className={`asset-table ${kind}`}><colgroup><col className="col-select"/><col className="col-host"/><col className="col-status"/><col className="col-title"/><col className="col-ip"/><col className="col-tech"/><col className="col-source"/><col className="col-tags"/><col className="col-confidence"/><col className="col-actions"/></colgroup><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
       const value = row.url || row.source_url || row.matched_at || row.name;
       const tags = tagsFor(row);
       return <tr key={`${kind}-${row.id}`} onClick={() => selectRow({...row, kind})} className={row.is_new ? 'new' : ''}>
@@ -433,8 +438,8 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
         <td>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : <span className="muted">—</span>}</td>
         <td title={[row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || '', row.reason || row.evidence || row.description || ''].filter(Boolean).join('\n')}><div className="cell-main">{row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || <span className="muted">—</span>}</div><div className="subtext">{row.reason || row.evidence || row.description || ''}</div></td>
         <td>{row.ip || (row.line ? `Line ${row.line}` : <span className="muted">—</span>)}<div className="subtext">{(row.ports || []).length ? `Ports ${(row.ports || []).join(', ')}` : row.column ? `Column ${row.column}` : ''}</div></td>
-        <td>{row.finding_type ? <TechBadges tech={[row.finding_type, ...(row.tags || [])]} /> : row.template_id ? <TechBadges tech={[row.type || 'nuclei', ...(row.tags || [])]} /> : <TechBadges tech={[...(row.fingerprints || []), ...(row.tech || [])]} />}</td>
-        <td title={(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{(row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div></td>
+        <td>{row.finding_type ? <TechBadges tech={[jsFinder(row), row.finding_type, ...(row.tags || [])]} max={8} /> : row.template_id ? <TechBadges tech={[row.type || 'nuclei', ...(row.tags || [])]} /> : <TechBadges tech={[...(row.fingerprints || []), ...(row.tech || [])]} />}</td>
+        <td title={jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div>{row.finding_type && <div className="subtext">{row.finding_type}</div>}</td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
         <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => sendToPlayground(row)}>Send</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run nuclei">Nuclei</button></td>
@@ -494,7 +499,7 @@ function DetailsPanel({row, result, close, markInteresting}) {
   const value = row.url || row.source_url || row.matched_at || row.name || row.image_path;
   const cdn = compactTech(row.tech).find(t => /cloudfront|cloudflare|akamai|fastly/i.test(t)) || '—';
   const asn = /amazon|aws|cloudfront|s3/i.test((row.tech || []).join(' ')) ? 'Amazon' : /cloudflare/i.test((row.tech || []).join(' ')) ? 'Cloudflare' : '—';
-  return <aside className="details"><button className="close" onClick={close}>Close</button><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Nuclei Finding</span>{row.template_id ? <><Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : 'warn'}>{row.severity}</Badge><Badge>{row.template_id}</Badge></> : '—'}</div><div className="detail-row"><span>Template Name</span>{row.template_name || '—'}</div><div className="detail-row"><span>Matcher / Type</span>{[row.matcher_name, row.type].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>JS Finding</span>{row.finding_type ? <><Badge tone={row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge><Badge>{row.finding_type}</Badge></> : '—'}</div><div className="detail-row"><span>Indicator</span>{row.indicator || '—'}</div><div className="detail-row"><span>Location</span>{row.line ? `Line ${row.line}${row.column ? `, column ${row.column}` : ''}` : '—'}</div><div className="detail-row"><span>Page URL</span>{row.page_url || '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || row.matched_at || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div>{row.description && <div className="detail-block"><span>Description</span><pre>{row.description}</pre></div>}{(row.extracted_results || []).length > 0 && <div className="detail-block"><span>Extracted Results</span><pre>{(row.extracted_results || []).join('\n')}</pre></div>}{(row.references || []).length > 0 && <div className="detail-block"><span>References</span><pre>{(row.references || []).join('\n')}</pre></div>}{row.evidence && <div className="detail-block"><span>Evidence</span><pre>{row.evidence}</pre></div>}{row.file_path && <div className="detail-block"><span>Downloaded bundle</span><pre>{row.file_path}</pre></div>}<div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div>{row.raw && <div className="detail-block"><span>Nuclei Raw</span><pre>{JSON.stringify(row.raw || {}, null, 2)}</pre></div>}<div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button onClick={() => sendToPlayground(row)}>Send to Playground</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
+  return <aside className="details"><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Nuclei Finding</span>{row.template_id ? <><Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : 'warn'}>{row.severity}</Badge><Badge>{row.template_id}</Badge></> : '—'}</div><div className="detail-row"><span>Template Name</span>{row.template_name || '—'}</div><div className="detail-row"><span>Matcher / Type</span>{[row.matcher_name, row.type].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>JS Finder</span>{row.finding_type ? <Badge tone={jsFinder(row) === 'TruffleHog' ? 'server' : 'client'}>{jsFinder(row)}</Badge> : '—'}</div><div className="detail-row"><span>JS Finding</span>{row.finding_type ? <><Badge tone={row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge><Badge>{row.finding_type}</Badge></> : '—'}</div><div className="detail-row"><span>Indicator</span>{row.indicator || '—'}</div><div className="detail-row"><span>Location</span>{row.line ? `Line ${row.line}${row.column ? `, column ${row.column}` : ''}` : '—'}</div><div className="detail-row"><span>Page URL</span>{row.page_url || '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || row.matched_at || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div>{row.description && <div className="detail-block"><span>Description</span><pre>{row.description}</pre></div>}{(row.extracted_results || []).length > 0 && <div className="detail-block"><span>Extracted Results</span><pre>{(row.extracted_results || []).join('\n')}</pre></div>}{(row.references || []).length > 0 && <div className="detail-block"><span>References</span><pre>{(row.references || []).join('\n')}</pre></div>}{row.evidence && <div className="detail-block"><span>Evidence</span><pre>{row.evidence}</pre></div>}{row.file_path && <div className="detail-block"><span>Downloaded bundle</span><pre>{row.file_path}</pre></div>}<div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div>{row.raw && <div className="detail-block"><span>Nuclei Raw</span><pre>{JSON.stringify(row.raw || {}, null, 2)}</pre></div>}<div className="detail-actions"><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button onClick={() => sendToPlayground(row)}>Send to Playground</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
 }
 
 
@@ -583,8 +588,100 @@ function headerLinesToObject(text) {
   }).filter(([key]) => key));
 }
 
+const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key', 'proxy-authorization']);
+const STATIC_ASSET_RE = /\.(css|js|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|pdf|zip|tar|gz|rar|7z|mp4|mp3|avi|mov)$/i;
+
 function objectToHeaderLines(headers = {}) {
   return Object.entries(headers || {}).map(([key, value]) => `${key}: ${value}`).join('\n');
+}
+
+function objectToHeaderRows(headers = {}) {
+  const rows = Object.entries(headers || {}).map(([key, value]) => ({enabled: true, key, value, masked: SENSITIVE_HEADERS.has(String(key).toLowerCase())}));
+  return rows.length ? rows : [{enabled: true, key: '', value: '', masked: false}];
+}
+
+function headerRowsToObject(rows = []) {
+  return Object.fromEntries(rows.filter(r => r.enabled && r.key.trim()).map(r => [r.key.trim(), r.value]));
+}
+
+function maskedHeaders(headers = {}) {
+  return Object.fromEntries(Object.entries(headers || {}).map(([key, value]) => [key, SENSITIVE_HEADERS.has(String(key).toLowerCase()) && value ? '••••••••' : value]));
+}
+
+function validHttpUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:'].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function urlParamNames(value) {
+  try {
+    return [...new URL(value).searchParams.keys()];
+  } catch {
+    return [];
+  }
+}
+
+function bodyParamNames(body, bodyType) {
+  if (!body || bodyType === 'none') return [];
+  if (bodyType === 'form') return [...new URLSearchParams(body).keys()];
+  if (bodyType === 'json') {
+    try {
+      const parsed = JSON.parse(body);
+      return parsed && !Array.isArray(parsed) && typeof parsed === 'object' ? Object.keys(parsed) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function hasTestableParameter(url, body, bodyType) {
+  return urlParamNames(url).length > 0 || bodyParamNames(body, bodyType).length > 0;
+}
+
+function requestPath(value) {
+  try {
+    const u = new URL(value);
+    return `${u.pathname || '/'}${u.search || ''}`;
+  } catch {
+    return value || '';
+  }
+}
+
+function formatBytes(bytes = 0) {
+  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes > 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes || 0} B`;
+}
+
+function prettyBody(response) {
+  const text = response?.response_body || '';
+  const type = String(response?.content_type || response?.response_headers?.['content-type'] || response?.response_headers?.['Content-Type'] || '').toLowerCase();
+  if (type.includes('json') || text.trim().startsWith('{') || text.trim().startsWith('[')) {
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch {}
+  }
+  return text || 'No response yet.';
+}
+
+function makeCurl({method, url, headers, body, bodyType}) {
+  const headerText = objectToHeaderLines(maskedHeaders(headers)).split('\n').filter(Boolean).map(h => `-H "${h}"`).join(' ');
+  const data = body && bodyType !== 'none' ? `--data ${JSON.stringify(body)}` : '';
+  return `curl -i -X ${method} ${headerText} ${data} "${url}"`.replace(/\s+/g, ' ').trim();
+}
+
+function redactSensitive(value) {
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (SENSITIVE_HEADERS.has(String(key).toLowerCase())) return [key, item ? '••••••••' : item];
+      return [key, redactSensitive(item)];
+    }));
+  }
+  return value;
 }
 
 function PlaygroundPage() {
@@ -593,25 +690,46 @@ function PlaygroundPage() {
   }, []);
   const [method, setMethod] = useState(seed.method || 'GET');
   const [url, setUrl] = useState(seed.url || '');
-  const [headers, setHeaders] = useState(objectToHeaderLines(seed.headers || {}));
+  const [headerMode, setHeaderMode] = useState('table');
+  const [headerRows, setHeaderRows] = useState(objectToHeaderRows(seed.headers || {}));
+  const [rawHeaders, setRawHeaders] = useState(objectToHeaderLines(seed.headers || {}));
+  const [bodyType, setBodyType] = useState(seed.body_type || (seed.body ? 'raw' : 'none'));
   const [body, setBody] = useState(seed.body || '');
   const [timeout, setTimeoutValue] = useState(20);
+  const [followRedirects, setFollowRedirects] = useState(true);
   const [response, setResponse] = useState(null);
+  const [responseTab, setResponseTab] = useState('Pretty');
+  const [bodySearch, setBodySearch] = useState('');
   const [history, setHistory] = useState([]);
-  const [toolResult, setToolResult] = useState(null);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [toolRuns, setToolRuns] = useState([]);
+  const [selectedParams, setSelectedParams] = useState({});
   const [busy, setBusy] = useState('');
   const [alert, setAlert] = useState('');
+  const [urlTouched, setUrlTouched] = useState(Boolean(seed.url));
 
   const refreshHistory = useCallback(() => j(`${API}/playground/history?limit=40`).then(r => setHistory(r.items || [])).catch(() => {}), []);
   useEffect(() => { refreshHistory(); }, [refreshHistory]);
   useEffect(() => {
     if (seed.url) localStorage.removeItem('playground.seed');
   }, [seed.url]);
+  useEffect(() => {
+    if (headerMode === 'table') setRawHeaders(objectToHeaderLines(headerRowsToObject(headerRows)));
+  }, [headerRows, headerMode]);
+
+  const headersObject = headerMode === 'raw' ? headerLinesToObject(rawHeaders) : headerRowsToObject(headerRows);
+  const urlValid = validHttpUrl(url);
+  const urlError = (urlTouched || alert) && url && !urlValid ? 'Playground URL must be an absolute http or https URL.' : '';
+  const arjunDisabled = !urlValid || Boolean(busy) || STATIC_ASSET_RE.test(new URL(urlValid ? url : 'https://placeholder.invalid/').pathname) || !['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].includes(method);
+  const dalfoxReason = !urlValid ? 'Enter a valid absolute URL first.' : !hasTestableParameter(url, body, bodyType) ? 'No testable parameter found. Run Arjun first or add a parameter manually.' : '';
+  const dalfoxDisabled = Boolean(busy) || Boolean(dalfoxReason) || !['GET','POST','PUT','PATCH','DELETE'].includes(method);
 
   async function send(save = true) {
-    setAlert(''); setBusy('request');
+    setUrlTouched(true); setAlert('');
+    if (!urlValid) return;
+    setBusy('request');
     try {
-      const payload = {method, url, headers: headerLinesToObject(headers), body, timeout: Number(timeout) || 20, save};
+      const payload = {method, url, headers: headersObject, body: bodyType === 'none' ? '' : body, body_type: bodyType, timeout: Number(timeout) || 20, follow_redirects: followRedirects, save};
       const res = await j(`${API}/playground/request`, {method: 'POST', body: JSON.stringify(payload)});
       setResponse(res.item);
       await refreshHistory();
@@ -625,40 +743,110 @@ function PlaygroundPage() {
   function loadItem(item) {
     setMethod(item.method || 'GET');
     setUrl(item.url || '');
-    setHeaders(objectToHeaderLines(item.request_headers || {}));
+    setUrlTouched(true);
+    setHeaderRows(objectToHeaderRows(item.request_headers || {}));
+    setRawHeaders(objectToHeaderLines(item.request_headers || {}));
     setBody(item.request_body || '');
+    setBodyType(item.request_body ? 'raw' : 'none');
     setResponse(item);
   }
 
-  async function runTool(tool) {
-    setAlert(''); setBusy(tool); setToolResult(null);
+  function updateHeaderRow(index, patch) {
+    setHeaderRows(rows => rows.map((row, i) => i === index ? {...row, ...patch, masked: patch.key !== undefined ? SENSITIVE_HEADERS.has(String(patch.key).toLowerCase()) : row.masked} : row));
+  }
+
+  function requestWithSelectedParams(params) {
+    const chosen = (params || discoveredParams).filter(p => selectedParams[`${p.method || 'GET'}:${p.param}`]);
+    if (!chosen.length) return {url, body, bodyType};
+    if (['POST','PUT','PATCH'].includes(method) && bodyType === 'json') {
+      let parsed = {};
+      try { parsed = body ? JSON.parse(body) : {}; } catch { parsed = {}; }
+      chosen.forEach(p => { if (!Object.prototype.hasOwnProperty.call(parsed, p.param)) parsed[p.param] = 'test'; });
+      return {url, body: JSON.stringify(parsed, null, 2), bodyType};
+    }
+    if (['POST','PUT','PATCH'].includes(method) && bodyType === 'form') {
+      const data = new URLSearchParams(body || '');
+      chosen.forEach(p => { if (!data.has(p.param)) data.set(p.param, 'test'); });
+      return {url, body: data.toString(), bodyType};
+    }
     try {
-      const payload = {method, url, headers: headerLinesToObject(headers), body, timeout: tool === 'dalfox' ? 180 : 120, arjun_methods: method};
-      setToolResult({tool, ...(await j(`${API}/playground/${tool}`, {method: 'POST', body: JSON.stringify(payload)}))});
+      const next = new URL(url);
+      chosen.forEach(p => { if (!next.searchParams.has(p.param)) next.searchParams.set(p.param, 'test'); });
+      return {url: next.toString(), body, bodyType};
+    } catch {}
+    return {url, body, bodyType};
+  }
+
+  function addSelectedToRequest(params) {
+    const next = requestWithSelectedParams(params);
+    setUrl(next.url);
+    setBody(next.body);
+    setBodyType(next.bodyType);
+    setUrlTouched(true);
+  }
+
+  async function runTool(tool, params = null) {
+    setUrlTouched(true); setAlert('');
+    const request = tool === 'dalfox' && params ? requestWithSelectedParams(params) : {url, body, bodyType};
+    if (tool === 'dalfox' && params) {
+      setUrl(request.url);
+      setBody(request.body);
+      setBodyType(request.bodyType);
+    }
+    if (!validHttpUrl(request.url)) return;
+    if (tool === 'dalfox' && !hasTestableParameter(request.url, request.body, request.bodyType)) {
+      setAlert('No testable parameter found. Run Arjun first or add a parameter manually.');
+      return;
+    }
+    const id = `${tool}-${Date.now()}`;
+    const run = {id, tool, status: 'running', startedAt: new Date().toISOString(), logs: '', request: {method, url: request.url, headers: maskedHeaders(headersObject), body: request.bodyType === 'none' ? '' : request.body, body_type: request.bodyType}, parameters: [], findings: []};
+    setToolRuns(runs => [run, ...runs]);
+    setBusy(tool);
+    try {
+      const payload = {method, url: request.url, headers: headersObject, body: request.bodyType === 'none' ? '' : request.body, body_type: request.bodyType, timeout: tool === 'dalfox' ? 180 : 120, arjun_methods: method};
+      const result = await j(`${API}/playground/${tool}`, {method: 'POST', body: JSON.stringify(payload)});
+      const paramsFound = (result.parameters || []).map(p => ({...p, param: p.param || p.name, method: p.method || p.location || method}));
+      if (tool === 'arjun') {
+        const selected = {};
+        paramsFound.forEach(p => { selected[`${p.method || 'GET'}:${p.param}`] = true; });
+        setSelectedParams(selected);
+      }
+      setToolRuns(runs => runs.map(item => item.id === id ? {...item, status: 'completed', completedAt: new Date().toISOString(), elapsedMs: Date.now() - new Date(run.startedAt).getTime(), logs: JSON.stringify(redactSensitive(result.raw || result), null, 2), parameters: paramsFound, findings: result.findings || [], result} : item));
     } catch (err) {
-      setToolResult({tool, error: err.message || String(err)});
+      setToolRuns(runs => runs.map(item => item.id === id ? {...item, status: 'failed', completedAt: new Date().toISOString(), elapsedMs: Date.now() - new Date(run.startedAt).getTime(), logs: err.message || String(err)} : item));
     } finally {
       setBusy('');
     }
   }
 
   const statusTone = response?.error ? 'server' : response?.status_code ? statusClass(response.status_code) : 'muted';
+  const discoveredParams = toolRuns.find(r => r.tool === 'arjun' && r.parameters?.length)?.parameters || [];
+  const displayBody = responseTab === 'Pretty' ? prettyBody(response) : responseTab === 'Raw' ? (response?.response_body || 'No response yet.') : (response?.response_body || 'No response yet.');
+  const filteredBody = bodySearch ? displayBody.split('\n').filter(line => line.toLowerCase().includes(bodySearch.toLowerCase())).join('\n') || 'No matches.' : displayBody;
   return <div className="playground-page">
     <header className="playground-header"><div className="brand"><h1>Playground</h1><div className="header-meta"><Badge tone="redirect">Repeater</Badge><span>Manual request testing and focused tools</span></div></div><div className="runbox"><button className="secondary" onClick={() => window.location.href = '/'}>Dashboard</button><button className="secondary" onClick={refreshHistory}>Refresh history</button></div></header>
     {alert && <div className="alert">{alert}</div>}
-    <main className="playground-layout">
+    <main className={`playground-layout ${historyOpen ? '' : 'history-collapsed'}`}>
       <section className="playground-compose">
-        <div className="playground-urlbar"><select value={method} onChange={e => setMethod(e.target.value)}>{['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(m => <option key={m}>{m}</option>)}</select><input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://target/path?param=value"/><button className="primary" disabled={!url || busy === 'request'} onClick={() => send(true)}>{busy === 'request' ? 'Sending...' : 'Send'}</button></div>
-        <div className="playground-editors"><label>Headers<textarea value={headers} onChange={e => setHeaders(e.target.value)} placeholder="Header: value"/></label><label>Body<textarea value={body} onChange={e => setBody(e.target.value)} placeholder="Raw request body"/></label></div>
-        <div className="playground-actions"><label>Timeout <input type="number" min="1" max="120" value={timeout} onChange={e => setTimeoutValue(e.target.value)}/></label><button onClick={() => navigator.clipboard?.writeText(`curl -i -X ${method} ${headers ? objectToHeaderLines(headerLinesToObject(headers)).split('\n').map(h => `-H "${h}"`).join(' ') : ''} ${body ? `--data ${JSON.stringify(body)}` : ''} "${url}"`)}>Copy curl</button><button onClick={() => runTool('arjun')} disabled={!url || Boolean(busy)}>{busy === 'arjun' ? 'Arjun...' : 'Run Arjun'}</button><button onClick={() => runTool('dalfox')} disabled={!url || Boolean(busy)}>{busy === 'dalfox' ? 'Dalfox...' : 'Run Dalfox'}</button></div>
+        <div className="playground-urlbar"><select value={method} onChange={e => setMethod(e.target.value)}>{['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(m => <option key={m}>{m}</option>)}</select><input value={url} onBlur={() => setUrlTouched(true)} onChange={e => { setUrl(e.target.value); setAlert(''); }} placeholder="https://target/path?param=value"/><button className="primary" disabled={!url || busy === 'request'} onClick={() => send(true)}>{busy === 'request' ? 'Sending...' : 'Send'}</button></div>
+        {urlError && <div className="inline-alert">{urlError}</div>}
+        <div className="editor-head"><b>Headers</b><div className="segmented"><button className={headerMode === 'table' ? 'sel' : ''} onClick={() => setHeaderMode('table')}>Key/value</button><button className={headerMode === 'raw' ? 'sel' : ''} onClick={() => setHeaderMode('raw')}>Raw headers</button></div></div>
+        {headerMode === 'table' ? <div className="header-grid"><span>On</span><span>Header</span><span>Value</span><span></span>{headerRows.map((row, index) => <React.Fragment key={index}><input type="checkbox" checked={row.enabled} onChange={e => updateHeaderRow(index, {enabled: e.target.checked})}/><input value={row.key} onChange={e => updateHeaderRow(index, {key: e.target.value})} placeholder="Authorization"/><input type={row.masked ? 'password' : 'text'} value={row.value} onChange={e => updateHeaderRow(index, {value: e.target.value})} placeholder="Bearer ..."/><button onClick={() => setHeaderRows(rows => rows.filter((_, i) => i !== index))}>Delete</button></React.Fragment>)}<button className="secondary" onClick={() => setHeaderRows(rows => [...rows, {enabled: true, key: '', value: '', masked: false}])}>Add header</button></div> : <textarea className="raw-editor" value={rawHeaders} onChange={e => setRawHeaders(e.target.value)} placeholder="Header: value"/>}
+        <div className="body-controls"><label>Body type <select value={bodyType} onChange={e => setBodyType(e.target.value)}>{[['none','None'],['form','Form URL encoded'],['json','JSON'],['raw','Raw']].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
+        {bodyType !== 'none' && <textarea className="body-editor" value={body} onChange={e => setBody(e.target.value)} placeholder={bodyType === 'json' ? '{\n  "username": "test"\n}' : bodyType === 'form' ? 'username=test&redirect=/home' : 'Raw request body'}/>}
+        <div className="playground-actions"><label>Timeout <input type="number" min="1" max="120" value={timeout} onChange={e => setTimeoutValue(e.target.value)}/></label><label><input type="checkbox" checked={followRedirects} onChange={e => setFollowRedirects(e.target.checked)}/> Follow redirects</label><button onClick={() => navigator.clipboard?.writeText(makeCurl({method, url, headers: headersObject, body, bodyType}))}>Copy curl</button></div>
+        <div className="focused-tools"><b>Focused tools</b><button onClick={() => runTool('arjun')} disabled={arjunDisabled}><span>Discover Parameters</span><small>Arjun</small></button><button onClick={() => runTool('dalfox')} disabled={dalfoxDisabled} title={dalfoxReason}><span>Scan for XSS</span><small>Dalfox</small></button>{dalfoxReason && urlValid && <p className="hint">{dalfoxReason}</p>}</div>
       </section>
       <section className="playground-response">
-        <div className="panel-title"><span>Response</span>{response && <><Badge tone={statusTone}>{response.error ? 'error' : response.status_code || 'sent'}</Badge><em>{response.duration_ms || 0} ms</em><em>{response.response_size || 0} B</em></>}</div>
+        <div className="panel-title"><span>Response</span>{response && <><Badge tone={statusTone}>{response.error ? 'error' : response.status_code || 'sent'}</Badge><em>{response.duration_ms || 0} ms</em><em>{formatBytes(response.response_size)}</em></>}</div>
         {response?.error && <div className="inline-alert">{response.error}</div>}
-        <div className="response-tabs"><div><b>Headers</b><pre>{JSON.stringify(response?.response_headers || {}, null, 2)}</pre></div><div><b>Body</b><pre>{response?.response_body || 'No response yet.'}</pre></div></div>
-        <div className="tool-output"><b>Tool Output</b><pre>{toolResult ? JSON.stringify(toolResult, null, 2) : 'Run Arjun or Dalfox on the current request.'}</pre></div>
+        {response && <div className="response-meta"><span>Status: {response.status_code || 'n/a'}</span><span>Time: {response.duration_ms || 0} ms</span><span>Size: {formatBytes(response.response_size)}</span><span>Content-Type: {response.content_type || response.response_headers?.['content-type'] || 'n/a'}</span><span>Final URL: {response.final_url || response.url}</span><span>Redirects: {response.redirect_count || 0}</span>{response.truncated && <Badge tone="warn">truncated</Badge>}</div>}
+        <div className="response-toolbar"><div className="segmented">{['Pretty','Raw','Preview'].map(tab => <button key={tab} className={responseTab === tab ? 'sel' : ''} onClick={() => setResponseTab(tab)}>{tab}</button>)}</div><input placeholder="Search body" value={bodySearch} onChange={e => setBodySearch(e.target.value)}/></div>
+        <div className="response-tabs"><div><b>Headers</b><pre>{JSON.stringify(response?.response_headers || {}, null, 2)}</pre></div><div><b>{responseTab === 'Preview' ? 'Sandboxed text preview' : 'Body'}</b><pre>{filteredBody}</pre></div></div>
+        {discoveredParams.length > 0 && <div className="discovered-params"><div className="panel-title"><span>Discovered parameters</span><Badge tone="ok">{discoveredParams.length}</Badge></div>{discoveredParams.map(p => <label key={`${p.method}:${p.param}`}><input type="checkbox" checked={Boolean(selectedParams[`${p.method || 'GET'}:${p.param}`])} onChange={e => setSelectedParams(s => ({...s, [`${p.method || 'GET'}:${p.param}`]: e.target.checked}))}/><b>{p.param}</b><span>{p.method || 'GET'}</span></label>)}<div className="playground-actions"><button onClick={() => addSelectedToRequest(discoveredParams)}>Add selected to request</button><button onClick={() => runTool('dalfox', discoveredParams)} disabled={busy}>Run Dalfox on selected</button><button onClick={() => navigator.clipboard?.writeText(discoveredParams.map(p => `${p.param}\t${p.method || 'GET'}`).join('\n'))}>Copy results</button></div></div>}
+        <div className="tool-runs"><div className="panel-title"><span>Tool Runs</span><Badge tone={busy ? 'redirect' : 'muted'}>{busy || 'idle'}</Badge></div>{toolRuns.length ? toolRuns.map(run => <div className="tool-card" key={run.id}><div><b>{run.tool === 'arjun' ? 'Arjun' : 'Dalfox'}</b><Badge tone={run.status === 'completed' ? 'ok' : run.status === 'failed' ? 'server' : 'redirect'}>{run.status}</Badge></div><p><span>Started: {new Date(run.startedAt).toLocaleTimeString()}</span><span>Elapsed: {Math.round((run.elapsedMs || (Date.now() - new Date(run.startedAt).getTime())) / 1000)}s</span><span>{run.tool === 'arjun' ? `Parameters found: ${run.parameters?.length || 0}` : `Findings: ${run.findings?.length || 0}`}</span></p><div className="playground-actions"><button onClick={() => navigator.clipboard?.writeText(makeCurl({method: run.request.method, url: run.request.url, headers: run.request.headers, body: run.request.body, bodyType: run.request.body_type}))}>View command</button><button onClick={() => navigator.clipboard?.writeText(run.logs || '')}>Copy output</button></div><pre>{run.logs || 'Queued.'}</pre></div>) : <p className="muted">Run Arjun or Dalfox on the current request.</p>}</div>
       </section>
-      <aside className="playground-history"><h2>History</h2>{history.length ? history.map(item => <button key={item.id} onClick={() => loadItem(item)}><b>{item.method} {hostFromUrl(item.url)}</b><span>{item.status_code || item.error || 'sent'} · {ago(item.created_at)}</span><small>{item.url}</small></button>) : <p className="muted">No requests yet.</p>}</aside>
+      <aside className="playground-history"><div className="panel-title"><span>History</span><button onClick={() => setHistoryOpen(!historyOpen)}>{historyOpen ? 'Collapse' : 'Expand'}</button></div>{historyOpen && <><div className="playground-actions"><button onClick={() => setHistory([])}>Clear history</button></div>{history.length ? history.map(item => <div className="history-card" key={item.id}><button onClick={() => loadItem(item)}><b>{item.method} {requestPath(item.url)}</b><span>{item.status_code || item.error || 'sent'} · {item.duration_ms || 0} ms · {ago(item.created_at)}</span><small>{hostFromUrl(item.url)}</small></button><div><button onClick={() => loadItem(item)}>Pin item</button><button onClick={() => setHistory(items => items.filter(x => x.id !== item.id))}>Delete item</button></div></div>) : <p className="muted">No requests yet.</p>}</>}</aside>
     </main>
   </div>;
 }

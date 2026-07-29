@@ -202,3 +202,37 @@ def test_playground_rejects_non_http_url():
     response = TestClient(app).post("/api/playground/request", json={"url": "file:///etc/passwd"})
 
     assert response.status_code == 422
+
+
+def test_playground_dalfox_rejects_parameterless_url():
+    response = TestClient(app).post("/api/playground/dalfox", json={"url": "https://example.com/search"})
+
+    assert response.status_code == 422
+    assert "No testable parameter found" in response.json()["detail"]
+
+
+def test_playground_dalfox_accepts_form_body_parameters(monkeypatch):
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    monkeypatch.setattr("app.main.shutil.which", lambda name: "dalfox" if name == "dalfox" else None)
+    monkeypatch.setattr("app.main.subprocess.run", lambda cmd, **kwargs: calls.append((cmd, kwargs)) or FakeProc())
+
+    response = TestClient(app).post("/api/playground/dalfox", json={
+        "method": "POST",
+        "url": "https://example.com/search",
+        "headers": {"Authorization": "Bearer secret"},
+        "body": "username=test&redirect=/home",
+        "body_type": "form",
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["parameters"] == [{"name": "username", "location": "POST"}, {"name": "redirect", "location": "POST"}]
+    assert body["request"]["headers"]["Authorization"] == "••••••••"
+    assert "-d" in calls[0][0]
+    assert "username=test&redirect=/home" in calls[0][0]

@@ -165,6 +165,7 @@ class PlaygroundRequestSend(BaseModel):
     url: str
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
+    body_type: str = "raw"
     timeout: int = Field(default=20, ge=1, le=120)
     follow_redirects: bool = True
     save: bool = True
@@ -175,6 +176,7 @@ class PlaygroundToolRequest(BaseModel):
     url: str
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
+    body_type: str = "raw"
     timeout: int = Field(default=120, ge=5, le=600)
     arjun_methods: str = "GET"
     arjun_threads: int = Field(default=5, ge=1, le=20)

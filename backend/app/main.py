@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -7,7 +8,7 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import httpx as pyhttpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -33,6 +34,7 @@ WORDLIST_DIR = DATA_DIR / "wordlists"
 SCREEN_DIR = DATA_DIR / "screenshots"
 PLAYGROUND_DIR = DATA_DIR / "playground"
 PLAYGROUND_BODY_LIMIT = 200000
+SENSITIVE_PLAYGROUND_HEADERS = {"authorization", "cookie", "x-api-key", "proxy-authorization"}
 
 app = FastAPI(title="Bug Bounty Recon Webapp")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -84,6 +86,71 @@ def _validate_playground_url(url: str) -> str:
     return normalized
 
 
+def _playground_headers(headers: dict[str, str] | None, body_type: str = "raw") -> dict[str, str]:
+    cleaned = {str(k).strip(): str(v) for k, v in (headers or {}).items() if str(k).strip()}
+    lower_keys = {k.lower() for k in cleaned}
+    if body_type == "json" and "content-type" not in lower_keys:
+        cleaned["Content-Type"] = "application/json"
+    if body_type == "form" and "content-type" not in lower_keys:
+        cleaned["Content-Type"] = "application/x-www-form-urlencoded"
+    return cleaned
+
+
+def _mask_playground_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {key: ("••••••••" if key.lower() in SENSITIVE_PLAYGROUND_HEADERS and value else value) for key, value in (headers or {}).items()}
+
+
+def _body_parameter_names(body: str | None, body_type: str) -> list[str]:
+    if not body or body_type in {"none", ""}:
+        return []
+    if body_type == "json":
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return []
+        if isinstance(parsed, dict):
+            return [str(k) for k in parsed.keys()]
+        return []
+    if body_type == "form":
+        return [key for key, _ in parse_qsl(body, keep_blank_values=True)]
+    return []
+
+
+def _testable_parameters(req: PlaygroundToolRequest) -> list[dict]:
+    parsed = urlparse(req.url)
+    params = [{"name": key, "location": "GET"} for key, _ in parse_qsl(parsed.query, keep_blank_values=True)]
+    body_location = "JSON" if req.body_type == "json" else "POST"
+    params.extend({"name": key, "location": body_location} for key in _body_parameter_names(req.body, req.body_type))
+    seen = set()
+    unique = []
+    for item in params:
+        key = (item["location"], item["name"])
+        if item["name"] and key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _is_static_asset(url: str) -> bool:
+    suffix = Path(urlparse(url).path.lower()).suffix
+    return suffix in {".css", ".js", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".mp4", ".mp3", ".avi", ".mov"}
+
+
+def _content_type(headers: dict[str, str]) -> str | None:
+    for key, value in headers.items():
+        if key.lower() == "content-type":
+            return value
+    return None
+
+
+def _js_finder(row: dict) -> str:
+    tags = {str(tag).lower() for tag in (row.get("tags") or [])}
+    finding_type = str(row.get("finding_type") or "").lower()
+    if "trufflehog" in tags or finding_type.startswith("trufflehog"):
+        return "TruffleHog"
+    return "Custom JS analyzer"
+
+
 def _row_playground_request(row: models.PlaygroundRequest) -> dict:
     return {
         "id": row.id,
@@ -117,7 +184,8 @@ def playground_history(limit: int = 30, target_id: int | None = None, db: Sessio
 def playground_send(req: PlaygroundRequestSend, db: Session = Depends(get_db)):
     url = _validate_playground_url(req.url)
     method = req.method.strip().upper() or "GET"
-    headers = {str(k).strip(): str(v) for k, v in (req.headers or {}).items() if str(k).strip()}
+    body_type = (req.body_type or "raw").lower()
+    headers = _playground_headers(req.headers, body_type)
     started = time.monotonic()
     status_code = None
     response_headers = {}
@@ -137,8 +205,12 @@ def playground_send(req: PlaygroundRequestSend, db: Session = Depends(get_db)):
         response_headers = dict(response.headers)
         response_size = len(response.content or b"")
         response_body = response.text[:PLAYGROUND_BODY_LIMIT]
+        final_url = str(response.url)
+        redirect_count = len(response.history)
     except Exception as exc:
         error = str(exc)
+        final_url = url
+        redirect_count = 0
     duration_ms = int((time.monotonic() - started) * 1000)
     payload = {
         "target_id": req.target_id,
@@ -159,7 +231,9 @@ def playground_send(req: PlaygroundRequestSend, db: Session = Depends(get_db)):
         db.add(row)
         db.commit()
         db.refresh(row)
-    return {"item": _row_playground_request(row) if row else {"id": None, **payload}, "truncated": response_size > len(response_body.encode("utf-8"))}
+    item = _row_playground_request(row) if row else {"id": None, **payload}
+    item.update({"final_url": final_url, "redirect_count": redirect_count, "content_type": _content_type(response_headers), "truncated": response_size > len(response_body.encode("utf-8"))})
+    return {"item": item, "truncated": item["truncated"]}
 
 
 @app.patch("/api/playground/history/{request_id}")
@@ -192,6 +266,11 @@ def _arjun_executable() -> list[str] | None:
 @app.post("/api/playground/arjun")
 def playground_arjun(req: PlaygroundToolRequest):
     url = _validate_playground_url(req.url)
+    method = req.method.strip().upper() or "GET"
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+        raise HTTPException(422, "Arjun supports standard HTTP methods only.")
+    if _is_static_asset(url):
+        raise HTTPException(422, "Arjun is disabled for obvious static assets.")
     exe = _arjun_executable()
     if not exe:
         raise HTTPException(501, "Arjun is not available in this container. Rebuild the backend image after installing requirements.")
@@ -201,18 +280,19 @@ def playground_arjun(req: PlaygroundToolRequest):
         infile = work / "arjun-input.txt"
         outfile = work / "arjun.json"
         infile.write_text(url + "\n", encoding="utf-8")
-        methods = [m.strip().upper() for m in req.arjun_methods.split(",") if m.strip()] or [req.method.upper()]
+        headers = _playground_headers(req.headers, req.body_type)
+        methods = [m.strip().upper() for m in req.arjun_methods.split(",") if m.strip()] or [method]
         results = []
         raw_outputs = []
         for method in methods:
-            cmd = build_arjun_command(infile, outfile, method, req.arjun_threads, req.arjun_request_timeout, req.headers, req.arjun_stable)
+            cmd = build_arjun_command(infile, outfile, method, req.arjun_threads, req.arjun_request_timeout, headers, req.arjun_stable)
             cmd = exe + cmd[1:]
             try:
                 stdout, stderr = run_command(cmd, timeout=req.timeout)
             except CommandError as exc:
                 stdout, stderr = exc.stdout or "", exc.stderr or str(exc)
             text = outfile.read_text(errors="ignore") if outfile.exists() else stdout
-            raw_outputs.append({"method": method, "stdout": stdout, "stderr": stderr, "json": text[:PLAYGROUND_BODY_LIMIT]})
+            raw_outputs.append({"method": method, "stdout": stdout, "stderr": stderr, "json": text[:PLAYGROUND_BODY_LIMIT], "request": {"method": method, "headers": _mask_playground_headers(headers), "body_type": req.body_type, "body": req.body or ""}})
             results.extend(parse_arjun_json(text, f"arjun-{method.lower()}"))
             if outfile.exists():
                 outfile.unlink()
@@ -222,10 +302,21 @@ def playground_arjun(req: PlaygroundToolRequest):
 @app.post("/api/playground/dalfox")
 def playground_dalfox(req: PlaygroundToolRequest):
     url = _validate_playground_url(req.url)
+    method = req.method.strip().upper() or "GET"
+    params = _testable_parameters(req)
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        raise HTTPException(422, "Dalfox supports GET, POST, PUT, PATCH, and DELETE requests in the Playground.")
+    if not params:
+        raise HTTPException(422, "No testable parameter found. Run Arjun first or add a parameter manually.")
     dalfox = shutil.which("dalfox")
     if not dalfox:
         raise HTTPException(501, "Dalfox is not available in this container. Rebuild the backend image after adding Dalfox.")
-    cmd = [dalfox, "url", url, "--silence", "--format", "json", "--timeout", str(req.timeout)]
+    headers = _playground_headers(req.headers, req.body_type)
+    cmd = [dalfox, "url", url, "--silence", "--format", "json", "--timeout", str(req.timeout), "-X", method]
+    for key, value in headers.items():
+        cmd.extend(["-H", f"{key}: {value}"])
+    if req.body and req.body_type != "none":
+        cmd.extend(["-d", req.body])
     if req.dalfox_options:
         cmd.extend(part for part in req.dalfox_options.split() if part)
     try:
@@ -239,7 +330,7 @@ def playground_dalfox(req: PlaygroundToolRequest):
         findings = parsed if isinstance(parsed, list) else parsed.get("data", []) if isinstance(parsed, dict) else []
     except Exception:
         findings = []
-    return {"url": url, "ok": proc.returncode == 0, "returncode": proc.returncode, "findings": findings, "stdout": proc.stdout[:PLAYGROUND_BODY_LIMIT], "stderr": proc.stderr[:PLAYGROUND_BODY_LIMIT]}
+    return {"url": url, "ok": proc.returncode == 0, "returncode": proc.returncode, "parameters": params, "findings": findings, "stdout": proc.stdout[:PLAYGROUND_BODY_LIMIT], "stderr": proc.stderr[:PLAYGROUND_BODY_LIMIT], "request": {"method": method, "headers": _mask_playground_headers(headers), "body_type": req.body_type, "body": req.body or ""}}
 
 @app.get("/api/wordlists")
 def list_wordlists(kind: str | None = None, db: Session = Depends(get_db)):
@@ -443,6 +534,8 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     parameters = [r for r in parameter_rows if not str(r.get("source") or "").startswith("arjun-")]
     arjun = [r for r in parameter_rows if str(r.get("source") or "").startswith("arjun-")]
     js_findings = [rowdict(r, ["id", "page_url", "source_url", "file_path", "finding_type", "severity", "indicator", "evidence", "line", "column", "confidence", "tags", "interesting", "note"]) for r in db.query(models.JsFinding).filter_by(scan_id=scan.id).all()]
+    for finding in js_findings:
+        finding["finder"] = _js_finder(finding)
     nuclei_findings = [rowdict(r, ["id", "template_id", "template_name", "severity", "matched_at", "host", "ip", "matcher_name", "type", "description", "extracted_results", "references", "tags", "raw", "interesting", "note"]) for r in db.query(models.NucleiFinding).filter_by(scan_id=scan.id).all()]
     screenshots = [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()]
     raw_rows = db.query(models.RawOutput).filter_by(scan_id=scan.id).all()
