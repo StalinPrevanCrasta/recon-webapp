@@ -170,6 +170,59 @@ def test_manual_arjun_endpoint_queues_existing_scan_and_clears_old_arjun_rows(mo
         db.close()
 
 
+def test_focused_nuclei_results_keep_parent_scan_rows(monkeypatch):
+    init_db()
+    db = SessionLocal()
+    try:
+        target = models.Target(domain=f"focused-{uuid4().hex}.example")
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+        parent = models.Scan(target_id=target.id, status="complete", stage="complete", progress=100, config={"run_nuclei": False})
+        db.add(parent)
+        db.commit()
+        db.refresh(parent)
+        db.add_all([
+            models.Subdomain(target_id=target.id, scan_id=parent.id, name=f"api.{target.domain}", sources=["test"], depths=[0], first_seen_scan_id=parent.id),
+            models.HttpxResult(target_id=target.id, scan_id=parent.id, url=f"https://api.{target.domain}", status_code=200, tech=["nginx"], headers_sent={}, first_seen_scan_id=parent.id),
+            models.DirbResult(target_id=target.id, scan_id=parent.id, base_url=f"https://api.{target.domain}", url=f"https://api.{target.domain}/admin", status_code=200, headers_sent={}, confidence="confirmed", first_seen_scan_id=parent.id),
+            models.ParameterResult(target_id=target.id, scan_id=parent.id, source_url=f"https://api.{target.domain}/search?q=x", base_url=f"https://api.{target.domain}/search", param="q", method="GET", source="gau", first_seen_scan_id=parent.id),
+            models.JsFinding(target_id=target.id, scan_id=parent.id, page_url=f"https://api.{target.domain}", source_url=f"https://api.{target.domain}/app.js", finding_type="endpoint", severity="low", indicator="/api/users", confidence="pattern", tags=["endpoint"], first_seen_scan_id=parent.id),
+            models.RawOutput(scan_id=parent.id, stage="httpx", tool="httpx", path="/data/raw/httpx.jsonl"),
+        ])
+        db.commit()
+        parent_id = parent.id
+        target_id = target.id
+    finally:
+        db.close()
+
+    monkeypatch.setattr("app.main.run_scan_task.delay", lambda queued_scan_id, stage: type("Task", (), {"id": "task-1"})())
+    response = TestClient(app).post(f"/api/scans/{parent_id}/rerun", json={"stage": "nuclei", "subset_urls": [f"https://api.focused.example"], "run_nuclei": True})
+    assert response.status_code == 200
+    child_id = response.json()["scan_id"]
+
+    db = SessionLocal()
+    try:
+        child = db.get(models.Scan, child_id)
+        child.status = "complete"
+        child.stage = "complete"
+        child.progress = 100
+        db.add(models.NucleiFinding(target_id=target_id, scan_id=child_id, template_id="test-template", template_name="Test Template", severity="high", matched_at="https://api.focused.example", type="http", extracted_results=[], references=[], tags=["exposure"], raw={}, first_seen_scan_id=child_id))
+        db.add(models.RawOutput(scan_id=child_id, stage="nuclei", tool="nuclei", path="/data/raw/nuclei.jsonl"))
+        db.commit()
+    finally:
+        db.close()
+
+    data = TestClient(app).get(f"/api/targets/{target_id}/results").json()
+    assert data["active_scan"]["id"] == child_id
+    assert len(data["http"]) == 1
+    assert len(data["dirs"]) == 1
+    assert len(data["parameters"]) == 1
+    assert len(data["js_findings"]) == 1
+    assert len(data["nuclei_findings"]) == 1
+    assert data["nuclei_findings"][0]["template_id"] == "test-template"
+
+
 def test_playground_request_sends_and_saves(monkeypatch):
     init_db()
 

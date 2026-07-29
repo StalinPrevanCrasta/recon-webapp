@@ -77,16 +77,33 @@ function loadStoredScanOpts() {
   }
 }
 
-function sendToPlayground(row = {}) {
-  const url = row.url || row.source_url || row.matched_at || row.base_url || row.name || '';
-  const seed = {
+function playgroundUrlForRow(row = {}) {
+  const value = row.url || row.source_url || row.page_url || row.matched_at || row.base_url || row.name || '';
+  if (!value || /^https?:\/\//i.test(value)) return value;
+  return value.includes('.') ? `https://${value}` : value;
+}
+
+function playgroundRequestForRow(row = {}) {
+  return {
     method: row.method || 'GET',
-    url,
+    url: playgroundUrlForRow(row),
     headers: row.headers_sent || {},
     body: '',
+    source: row.kind || row.finding_type || row.source || row.template_id || '',
+    label: row.path || row.param || row.indicator || row.title || row.template_name || '',
   };
-  localStorage.setItem('playground.seed', JSON.stringify(seed));
+}
+
+function sendRowsToPlayground(rows = []) {
+  const requests = rows.map(playgroundRequestForRow).filter(item => item.url);
+  if (!requests.length) return;
+  localStorage.setItem('playground.seed', JSON.stringify(requests[0]));
+  localStorage.setItem('playground.queue', JSON.stringify(requests));
   window.open('/playground', '_blank', 'noopener,noreferrer');
+}
+
+function sendToPlayground(row = {}) {
+  sendRowsToPlayground([row]);
 }
 
 function nucleiUrlForRow(row = {}) {
@@ -435,9 +452,10 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
   const visible = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
   useEffect(() => { setPage(1); }, [filters, kind]);
   const copy = value => navigator.clipboard?.writeText(value).catch(() => {});
+  const selectedRows = filtered.filter(r => selectedIds.has(r.id));
   return <>
     <Filters filters={filters} setFilters={setFilters}/>
-    <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedIds.size} selected</span><button onClick={() => copy(filtered.filter(r => selectedIds.has(r.id)).map(r => r.url || r.source_url || r.name || r.matched_at).filter(Boolean).join('\n'))}>Copy selected</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
+    <div className="bulkbar"><label><input type="checkbox" onChange={e => visible.forEach(r => toggleSelected(r.id, e.target.checked))}/> Select page</label><span>{selectedRows.length} selected here</span><button onClick={() => copy(selectedRows.map(r => r.url || r.source_url || r.name || r.matched_at).filter(Boolean).join('\n'))}>Copy selected</button><button className="primary subtle" disabled={!selectedRows.length} onClick={() => sendRowsToPlayground(selectedRows)}>Send selected to Playground</button><div className="pager"><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button><span>Page {safePage} / {totalPages} · {filtered.length} results</span><button disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Next</button><select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}><option value="50">50/page</option><option value="100">100/page</option><option value="250">250/page</option></select></div></div>
     <div className="table-wrap"><table className={`asset-table ${kind}`}><colgroup><col className="col-select"/><col className="col-host"/><col className="col-status"/><col className="col-title"/><col className="col-ip"/><col className="col-tech"/><col className="col-source"/><col className="col-tags"/><col className="col-confidence"/><col className="col-actions"/></colgroup><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
       const value = row.url || row.source_url || row.matched_at || row.name;
       const tags = tagsFor(row);
@@ -451,7 +469,7 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
         <td title={jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div>{row.finding_type && <div className="subtext">{row.finding_type}</div>}</td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
         <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
-        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button onClick={() => sendToPlayground(row)}>Send</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run Nuclei on this row" disabled={!runNucleiOnRows || !nucleiUrlForRow(row)} onClick={() => runNucleiOnRows([row])}>Nuclei</button></td>
+        <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(value, '_blank')}>Open</button><button onClick={() => copy(value)}>Copy</button><button title="Send to Playground" onClick={() => sendToPlayground({...row, kind})}>Playground</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run Nuclei on this row" disabled={!runNucleiOnRows || !nucleiUrlForRow(row)} onClick={() => runNucleiOnRows([row])}>Nuclei</button></td>
       </tr>;
     })}</tbody></table></div>
   </>;
@@ -697,6 +715,9 @@ function PlaygroundPage() {
   const seed = useMemo(() => {
     try { return JSON.parse(localStorage.getItem('playground.seed') || '{}'); } catch { return {}; }
   }, []);
+  const queuedSeed = useMemo(() => {
+    try { return JSON.parse(localStorage.getItem('playground.queue') || '[]'); } catch { return []; }
+  }, []);
   const [method, setMethod] = useState(seed.method || 'GET');
   const [url, setUrl] = useState(seed.url || '');
   const [headerMode, setHeaderMode] = useState('table');
@@ -713,6 +734,7 @@ function PlaygroundPage() {
   const [historyOpen, setHistoryOpen] = useState(true);
   const [toolRuns, setToolRuns] = useState([]);
   const [selectedParams, setSelectedParams] = useState({});
+  const [importedRequests, setImportedRequests] = useState(Array.isArray(queuedSeed) ? queuedSeed : []);
   const [busy, setBusy] = useState('');
   const [alert, setAlert] = useState('');
   const [urlTouched, setUrlTouched] = useState(Boolean(seed.url));
@@ -721,7 +743,8 @@ function PlaygroundPage() {
   useEffect(() => { refreshHistory(); }, [refreshHistory]);
   useEffect(() => {
     if (seed.url) localStorage.removeItem('playground.seed');
-  }, [seed.url]);
+    if (queuedSeed.length) localStorage.removeItem('playground.queue');
+  }, [seed.url, queuedSeed.length]);
   useEffect(() => {
     if (headerMode === 'table') setRawHeaders(objectToHeaderLines(headerRowsToObject(headerRows)));
   }, [headerRows, headerMode]);
@@ -758,6 +781,17 @@ function PlaygroundPage() {
     setBody(item.request_body || '');
     setBodyType(item.request_body ? 'raw' : 'none');
     setResponse(item);
+  }
+
+  function loadImportedRequest(item) {
+    setMethod(item.method || 'GET');
+    setUrl(item.url || '');
+    setUrlTouched(true);
+    setHeaderRows(objectToHeaderRows(item.headers || {}));
+    setRawHeaders(objectToHeaderLines(item.headers || {}));
+    setBody(item.body || '');
+    setBodyType(item.body_type || (item.body ? 'raw' : 'none'));
+    setResponse(null);
   }
 
   function updateHeaderRow(index, patch) {
@@ -837,6 +871,7 @@ function PlaygroundPage() {
     {alert && <div className="alert">{alert}</div>}
     <main className={`playground-layout ${historyOpen ? '' : 'history-collapsed'}`}>
       <section className="playground-compose">
+        {importedRequests.length > 0 && <div className="playground-imports"><div className="panel-title"><span>Imported from pipeline</span><Badge tone="ok">{importedRequests.length}</Badge><button onClick={() => setImportedRequests([])}>Clear</button></div>{importedRequests.map((item, index) => <button key={`${item.url}-${index}`} className={item.url === url ? 'active' : ''} onClick={() => loadImportedRequest(item)}><b>{item.method || 'GET'} {hostFromUrl(item.url)}</b><span>{item.label || item.source || requestPath(item.url)}</span><small>{item.url}</small></button>)}</div>}
         <div className="playground-urlbar"><select value={method} onChange={e => setMethod(e.target.value)}>{['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(m => <option key={m}>{m}</option>)}</select><input value={url} onBlur={() => setUrlTouched(true)} onChange={e => { setUrl(e.target.value); setAlert(''); }} placeholder="https://target/path?param=value"/><button className="primary" disabled={!url || busy === 'request'} onClick={() => send(true)}>{busy === 'request' ? 'Sending...' : 'Send'}</button></div>
         {urlError && <div className="inline-alert">{urlError}</div>}
         <div className="editor-head"><b>Headers</b><div className="segmented"><button className={headerMode === 'table' ? 'sel' : ''} onClick={() => setHeaderMode('table')}>Key/value</button><button className={headerMode === 'raw' ? 'sel' : ''} onClick={() => setHeaderMode('raw')}>Raw headers</button></div></div>

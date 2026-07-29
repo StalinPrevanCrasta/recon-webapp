@@ -380,6 +380,8 @@ def rerun_stage(scan_id: int, req: StageRerunRequest, db: Session = Depends(get_
         raise HTTPException(404, "scan not found")
     config = dict(parent.config or {})
     config.update(req.model_dump())
+    config["parent_scan_id"] = parent.id
+    config["focused_stage"] = req.stage
     scan = models.Scan(target_id=parent.target_id, status="queued", stage=f"queued:{req.stage}", config=config)
     db.add(scan); db.commit(); db.refresh(scan)
     task = run_scan_task.delay(scan.id, req.stage)
@@ -521,24 +523,33 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     if not scan:
         return {"target": {"id": target.id, "domain": target.domain}, "scans": [], "subdomains": [], "http": [], "dirs": [], "parameters": [], "arjun": [], "js_findings": [], "nuclei_findings": [], "screenshots": [], "raw": []}
     prev = db.query(models.Scan).filter(models.Scan.target_id == target_id, models.Scan.id < scan.id).order_by(models.Scan.id.desc()).first()
+    parent_scan = db.get(models.Scan, (scan.config or {}).get("parent_scan_id")) if (scan.config or {}).get("parent_scan_id") else None
+    legacy_focused_stage = (scan.config or {}).get("stage") if (scan.config or {}).get("subset_urls") else None
+    if not parent_scan and legacy_focused_stage in {"nuclei", "ffuf", "parameters", "js_intel", "screenshots", "wappalyzer"}:
+        parent_scan = prev
+    focused_stage = ((scan.config or {}).get("focused_stage") or legacy_focused_stage) if parent_scan and parent_scan.target_id == target_id else None
+    base_scan_id = parent_scan.id if focused_stage else scan.id
+    def data_scan_id(stage: str) -> int:
+        return scan.id if focused_stage == stage else base_scan_id
     def rowdict(row, keys):
         d = {k: getattr(row, k) for k in keys}; d["first_seen_scan_id"] = getattr(row, "first_seen_scan_id", None); d["is_new"] = getattr(row, "first_seen_scan_id", scan.id) == scan.id; return d
     subdomain_query = db.query(models.Subdomain).filter_by(target_id=target_id)
     if (scan.config or {}).get("fresh_subdomain_scan", False) or not (scan.config or {}).get("use_cached_subdomains", True):
         subdomain_query = subdomain_query.filter(or_(models.Subdomain.scan_id == scan.id, models.Subdomain.first_seen_scan_id == scan.id))
     subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in subdomain_query.all()]
-    ports = [rowdict(r, ["id", "host", "ip", "port", "protocol", "source"]) for r in db.query(models.PortResult).filter_by(scan_id=scan.id).all()]
-    http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "fingerprints", "ports", "response_size", "server", "redirect_chain", "ip", "headers_sent", "response_headers", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()]
-    dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=scan.id).all()]
-    parameter_rows = [rowdict(r, ["id", "source_url", "base_url", "param", "sample_value", "method", "source", "suspicious", "reason", "interesting", "note"]) for r in db.query(models.ParameterResult).filter_by(scan_id=scan.id).all()]
+    ports = [rowdict(r, ["id", "host", "ip", "port", "protocol", "source"]) for r in db.query(models.PortResult).filter_by(scan_id=data_scan_id("naabu")).all()]
+    http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "fingerprints", "ports", "response_size", "server", "redirect_chain", "ip", "headers_sent", "response_headers", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=data_scan_id("httpx")).all()]
+    dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=data_scan_id("ffuf")).all()]
+    parameter_rows = [rowdict(r, ["id", "source_url", "base_url", "param", "sample_value", "method", "source", "suspicious", "reason", "interesting", "note"]) for r in db.query(models.ParameterResult).filter_by(scan_id=data_scan_id("parameters")).all()]
     parameters = [r for r in parameter_rows if not str(r.get("source") or "").startswith("arjun-")]
     arjun = [r for r in parameter_rows if str(r.get("source") or "").startswith("arjun-")]
-    js_findings = [rowdict(r, ["id", "page_url", "source_url", "file_path", "finding_type", "severity", "indicator", "evidence", "line", "column", "confidence", "tags", "interesting", "note"]) for r in db.query(models.JsFinding).filter_by(scan_id=scan.id).all()]
+    js_findings = [rowdict(r, ["id", "page_url", "source_url", "file_path", "finding_type", "severity", "indicator", "evidence", "line", "column", "confidence", "tags", "interesting", "note"]) for r in db.query(models.JsFinding).filter_by(scan_id=data_scan_id("js_intel")).all()]
     for finding in js_findings:
         finding["finder"] = _js_finder(finding)
-    nuclei_findings = [rowdict(r, ["id", "template_id", "template_name", "severity", "matched_at", "host", "ip", "matcher_name", "type", "description", "extracted_results", "references", "tags", "raw", "interesting", "note"]) for r in db.query(models.NucleiFinding).filter_by(scan_id=scan.id).all()]
-    screenshots = [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=scan.id).all()]
-    raw_rows = db.query(models.RawOutput).filter_by(scan_id=scan.id).all()
+    nuclei_findings = [rowdict(r, ["id", "template_id", "template_name", "severity", "matched_at", "host", "ip", "matcher_name", "type", "description", "extracted_results", "references", "tags", "raw", "interesting", "note"]) for r in db.query(models.NucleiFinding).filter_by(scan_id=data_scan_id("nuclei")).all()]
+    screenshots = [{"id": r.id, "url": r.url, "image_path": r.image_path, "image_url": "/screenshots/" + str(Path(r.image_path).relative_to(SCREEN_DIR)).replace('\\', '/'), "tag": r.tag, "interesting": r.interesting, "note": r.note} for r in db.query(models.Screenshot).filter_by(scan_id=data_scan_id("screenshots")).all()]
+    raw_scan_ids = [scan.id, base_scan_id] if focused_stage and base_scan_id != scan.id else [scan.id]
+    raw_rows = db.query(models.RawOutput).filter(models.RawOutput.scan_id.in_(raw_scan_ids)).all()
     raw = [{"id": r.id, "stage": r.stage, "tool": r.tool, "path": r.path} for r in raw_rows]
     return {
         "target": {"id": target.id, "domain": target.domain},
