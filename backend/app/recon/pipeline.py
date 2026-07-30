@@ -1541,7 +1541,7 @@ def run_arjun(db: Session, scan: models.Scan, urls: list[str] | None = None) -> 
 def run_screenshots(db: Session, scan: models.Scan) -> None:
     settings = load_settings()
     command = _command_for_scan(scan.id)
-    urls = [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id, models.HttpxResult.status_code.in_([200, 301, 302, 307, 401, 403])).all()]
+    urls = [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id).all()]
     if not urls:
         return
     infile = raw_path(scan.id, "screenshots", "input")

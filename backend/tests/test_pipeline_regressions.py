@@ -86,16 +86,21 @@ def test_gowitness_uses_current_chrome_flags_and_png_format(tmp_path):
 def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
     db, target, scan = make_scan({"run_screenshots": True})
     db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://a.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://error.example", status_code=503, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
     db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="http://careers-in.floatbot.ai:8080", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
     db.commit()
 
     monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
     monkeypatch.setattr(pipeline, "SCREEN_DIR", tmp_path / "screenshots")
+    captured_inputs = []
 
     def fake_run_command(cmd, timeout=None):
+        infile = Path(cmd[cmd.index("-f") + 1])
+        captured_inputs.extend(infile.read_text().splitlines())
         outdir = Path(cmd[cmd.index("--screenshot-path") + 1])
         outdir.mkdir(parents=True, exist_ok=True)
         (outdir / "https_a.example.png").write_bytes(b"png")
+        (outdir / "https_error.example.png").write_bytes(b"png")
         (outdir / "https_b.example.jpg").write_bytes(b"jpg")
         (outdir / "https_c.example.jpeg").write_bytes(b"jpeg")
         (outdir / "http---careers-in.floatbot.ai-8080.png").write_bytes(b"png")
@@ -106,7 +111,8 @@ def test_screenshot_import_accepts_png_jpg_and_jpeg(monkeypatch, tmp_path):
     try:
         pipeline.run_screenshots(db, scan)
         rows = db.query(models.Screenshot).filter_by(scan_id=scan.id).all()
-        assert len(rows) == 4
+        assert "https://error.example" in captured_inputs
+        assert len(rows) == 5
         assert {Path(r.image_path).suffix for r in rows} == {".png", ".jpg", ".jpeg"}
         assert db.query(models.Screenshot).filter_by(scan_id=scan.id, url="http://careers-in.floatbot.ai:8080").count() == 1
     finally:
