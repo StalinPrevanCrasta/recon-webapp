@@ -124,6 +124,36 @@ def test_decode_gowitness_stem_restores_scheme_and_port():
     assert pipeline.decode_gowitness_stem("https---academy.floatbot.ai-443") == "https://academy.floatbot.ai:443"
 
 
+def test_run_parameters_streams_katana_output_and_records_summary(monkeypatch, tmp_path):
+    db, target, scan = make_scan({"parameter_timeout": 60, "max_katana_urls": 1, "max_katana_output_mb": 10})
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://a.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.add(models.HttpxResult(target_id=target.id, scan_id=scan.id, url="https://b.example", status_code=200, tech=[], headers_sent={}, first_seen_scan_id=scan.id))
+    db.commit()
+    monkeypatch.setattr(pipeline, "RAW_DIR", tmp_path / "raw")
+
+    def fake_run_command(cmd, timeout=None):
+        if cmd[0] == "gau":
+            return "https://archive.example/search?q=one\n", ""
+        if cmd[0] == "katana":
+            infile = Path(cmd[cmd.index("-list") + 1])
+            assert infile.read_text(encoding="utf-8").splitlines() == ["https://a.example"]
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_text('{"request":{"endpoint":"https://a.example/api?token=abc","method":"GET"}}\n', encoding="utf-8")
+            return "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pipeline, "run_command", fake_run_command)
+    try:
+        stats = pipeline.run_parameters(db, scan)
+        assert stats["parameters"] == 2
+        assert stats["katana_input_urls"] == 1
+        assert db.query(models.ParameterResult).filter_by(scan_id=scan.id).count() == 2
+        raw_tools = {r.tool for r in db.query(models.RawOutput).filter_by(scan_id=scan.id, stage="parameters").all()}
+        assert {"parameters-summary", "katana-raw-summary"}.issubset(raw_tools)
+    finally:
+        db.close()
+
+
 def test_upsert_subdomain_deduplicates_pending_rows_before_commit():
     db, target, scan = make_scan()
     try:

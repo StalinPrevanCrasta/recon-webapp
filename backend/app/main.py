@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
@@ -84,6 +84,43 @@ def _validate_playground_url(url: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(422, "Playground URL must be an absolute http or https URL.")
     return normalized
+
+
+def _read_raw_json(path: str) -> dict:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+
+
+def _raw_meta(raw_rows: list[models.RawOutput], stage: str, tool: str) -> dict:
+    for row in raw_rows:
+        if row.stage == stage and row.tool == tool:
+            return _read_raw_json(row.path)
+    return {}
+
+
+def recover_stale_scan(db: Session, scan: models.Scan) -> None:
+    if not scan or scan.status not in {"running", "queued", "stopping"}:
+        return
+    stale_minutes = int((scan.config or {}).get("stale_scan_minutes", 30))
+    scan_dir = DATA_DIR / "raw" / f"scan-{scan.id}"
+    latest_ts = scan.started_at or scan.created_at
+    stale_stage = scan.stage
+    if scan_dir.exists():
+        for path in scan_dir.rglob("*"):
+            try:
+                if path.is_file():
+                    latest_ts = max(latest_ts, datetime.fromtimestamp(path.stat().st_mtime))
+            except OSError:
+                pass
+    if datetime.utcnow() - latest_ts < timedelta(minutes=stale_minutes):
+        return
+    scan.status = "partial" if scan.progress and scan.progress >= 50 else "failed"
+    scan.stage = "stale"
+    scan.finished_at = datetime.now(UTC)
+    scan.error = f"Scan marked stale after {stale_minutes} minute(s) without raw-output activity during {stale_stage}."
+    db.commit()
 
 
 def _playground_headers(headers: dict[str, str] | None, body_type: str = "raw") -> dict[str, str]:
@@ -415,6 +452,8 @@ def scan_status(scan_id: int, db: Session = Depends(get_db)):
     scan = db.get(models.Scan, scan_id)
     if not scan:
         raise HTTPException(404, "scan not found")
+    recover_stale_scan(db, scan)
+    db.refresh(scan)
     return {"id": scan.id, "target_id": scan.target_id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error, "created_at": scan.created_at, "started_at": scan.started_at, "finished_at": scan.finished_at}
 
 @app.post("/api/scans/{scan_id}/stop")
@@ -498,6 +537,9 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
         return "not_started"
     ffuf_errors = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf-error"]
     ffuf_success = [r for r in raw_by_stage.get("ffuf", []) if r.tool == "ffuf"]
+    ffuf_summary = _raw_meta(raw, "ffuf", "ffuf-summary")
+    parameter_summary = _raw_meta(raw, "parameters", "parameters-summary")
+    screenshot_summary = _raw_meta(raw, "screenshots", "screenshots-summary")
     new_subdomain_count = len([s for s in subdomains if s.get("is_new")])
     cached_subdomain_count = max(0, len(subdomains) - new_subdomain_count)
     return {
@@ -506,11 +548,11 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
         "httpx": {"status": stage_state("httpx", len(http)), "results": len(http), "total": len(subdomains)},
         "wappalyzer": {"status": stage_state("wappalyzer", len([h for h in http if h.get("tech")])), "results": len([h for h in http if h.get("tech")]), "total": len(http)},
         "js_intel": {"status": stage_state("js_intel", len(js_findings)), "results": len(js_findings), "high": len([j for j in js_findings if j.get("severity") == "high"])},
-        "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status in {"running", "stopping"} else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": len(ffuf_success), "failed_hosts": len(ffuf_errors), "total": len(http)},
+        "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status in {"running", "stopping"} else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": ffuf_summary.get("successful_hosts", len(ffuf_success)), "failed_hosts": ffuf_summary.get("failed_hosts", len(ffuf_errors)), "total": ffuf_summary.get("total_hosts", len(http))},
         "nuclei": {"status": stage_state("nuclei", len(nuclei_findings)), "results": len(nuclei_findings), "high": len([n for n in nuclei_findings if n.get("severity") == "high"]), "critical": len([n for n in nuclei_findings if n.get("severity") == "critical"])},
-        "parameters": {"status": stage_state("parameters", len(parameters)), "results": len(parameters), "suspicious": len([p for p in parameters if p.get("suspicious")])},
+        "parameters": {"status": stage_state("parameters", len(parameters)), "results": len(parameters), "suspicious": len([p for p in parameters if p.get("suspicious")]), "katana_input_urls": parameter_summary.get("katana_input_urls"), "lines": parameter_summary.get("lines"), "parse_errors": parameter_summary.get("parse_errors", 0), "raw_compacted": (parameter_summary.get("katana_raw") or {}).get("compacted")},
         "arjun": {"status": stage_state("arjun", len(arjun)), "results": len(arjun), "suspicious": len([p for p in arjun if p.get("suspicious")])},
-        "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots)},
+        "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots), "input_urls": screenshot_summary.get("input_urls"), "saved": screenshot_summary.get("saved", len(screenshots)), "failed": screenshot_summary.get("failed")},
     }
 
 @app.get("/api/targets/{target_id}/results")
@@ -522,6 +564,8 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     scan = db.get(models.Scan, scan_id) if scan_id else scans_q.first()
     if not scan:
         return {"target": {"id": target.id, "domain": target.domain}, "scans": [], "subdomains": [], "http": [], "dirs": [], "parameters": [], "arjun": [], "js_findings": [], "nuclei_findings": [], "screenshots": [], "raw": []}
+    recover_stale_scan(db, scan)
+    db.refresh(scan)
     prev = db.query(models.Scan).filter(models.Scan.target_id == target_id, models.Scan.id < scan.id).order_by(models.Scan.id.desc()).first()
     parent_scan = db.get(models.Scan, (scan.config or {}).get("parent_scan_id")) if (scan.config or {}).get("parent_scan_id") else None
     legacy_focused_stage = (scan.config or {}).get("stage") if (scan.config or {}).get("subset_urls") else None

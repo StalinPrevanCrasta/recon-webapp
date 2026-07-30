@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.26-bookworm AS tools-builder
+ENV GOPROXY=https://proxy.golang.org,direct
 ARG NUCLEI_VERSION=v3.11.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git build-essential libpcap-dev && \
@@ -15,14 +16,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go install github.com/lc/gau/v2/cmd/gau@v2.2.4 && \
     go install github.com/projectdiscovery/katana/cmd/katana@v1.6.1 && \
     go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION} && \
+    go install github.com/owasp-amass/amass/v4/...@latest && \
     go install github.com/hahwul/dalfox/v2@latest
 
-FROM kalilinux/kali-rolling
+FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive PATH=/usr/local/bin:$PATH RECON_DATA_DIR=/data
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv ca-certificates curl git libpcap0.8 \
-    chromium xvfb amass dnsutils && \
+    chromium xvfb dnsutils && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=tools-builder /go/bin/subfinder /usr/local/bin/subfinder
 COPY --from=tools-builder /go/bin/naabu /usr/local/bin/naabu
@@ -33,6 +35,7 @@ COPY --from=tools-builder /go/bin/puredns /usr/local/bin/puredns
 COPY --from=tools-builder /go/bin/gau /usr/local/bin/gau
 COPY --from=tools-builder /go/bin/katana /usr/local/bin/katana
 COPY --from=tools-builder /go/bin/nuclei /usr/local/bin/nuclei
+COPY --from=tools-builder /go/bin/amass /usr/local/bin/amass
 COPY --from=tools-builder /go/bin/dalfox /usr/local/bin/dalfox
 ARG TRUFFLEHOG_VERSION=3.96.0
 RUN curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \

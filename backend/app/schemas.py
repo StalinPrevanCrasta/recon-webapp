@@ -39,6 +39,7 @@ class RunScanRequest(BaseModel):
     ffuf_host_timeout: int = Field(default=300, ge=30, le=3600)
     ffuf_threads: int = Field(default=20, ge=1, le=200)
     ffuf_rate: int | None = Field(default=None, ge=1)
+    max_ffuf_hosts: int | None = Field(default=None, ge=1, le=10000)
     run_ffuf: bool = True
     run_parameters: bool = True
     run_js_intel: bool = True
@@ -67,6 +68,8 @@ class RunScanRequest(BaseModel):
     run_katana_headless: bool = False
     parameter_timeout: int = Field(default=240, ge=30, le=3600)
     katana_crawl_duration: str = "2m"
+    max_katana_urls: int | None = Field(default=80, ge=1, le=10000)
+    max_katana_output_mb: int = Field(default=250, ge=10, le=5000)
     run_arjun: bool = False
     arjun_only: bool = False
     arjun_methods: str = "GET"
@@ -75,6 +78,8 @@ class RunScanRequest(BaseModel):
     arjun_request_timeout: int = Field(default=10, ge=3, le=60)
     arjun_stable: bool = True
     run_screenshots: bool = True
+    max_screenshot_urls: int | None = Field(default=None, ge=1, le=10000)
+    stale_scan_minutes: int = Field(default=30, ge=5, le=1440)
     subset_urls: list[str] | None = None
 
 class StageRerunRequest(BaseModel):
@@ -108,6 +113,7 @@ class StageRerunRequest(BaseModel):
     ffuf_host_timeout: int = 300
     ffuf_threads: int = 25
     ffuf_rate: int | None = None
+    max_ffuf_hosts: int | None = None
     run_parameters: bool = True
     run_js_intel: bool = True
     js_intel_max_hosts: int = 80
@@ -135,6 +141,8 @@ class StageRerunRequest(BaseModel):
     run_katana_headless: bool = False
     parameter_timeout: int = 240
     katana_crawl_duration: str = "2m"
+    max_katana_urls: int | None = 80
+    max_katana_output_mb: int = 250
     run_arjun: bool = False
     arjun_only: bool = False
     arjun_methods: str = "GET"
@@ -142,6 +150,8 @@ class StageRerunRequest(BaseModel):
     arjun_threads: int = 5
     arjun_request_timeout: int = 10
     arjun_stable: bool = True
+    max_screenshot_urls: int | None = None
+    stale_scan_minutes: int = 30
     subset_urls: list[str] | None = None
 
 class InterestingPatch(BaseModel):

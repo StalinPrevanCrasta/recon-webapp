@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import shutil
+import gzip
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,6 +39,7 @@ SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "500"))
 FFUF_RESULT_BATCH_SIZE = int(os.getenv("FFUF_RESULT_BATCH_SIZE", "50"))
 JS_INTEL_BATCH_SIZE = int(os.getenv("JS_INTEL_BATCH_SIZE", "50"))
 NUCLEI_RESULT_BATCH_SIZE = int(os.getenv("NUCLEI_RESULT_BATCH_SIZE", "50"))
+PARAMETER_RESULT_BATCH_SIZE = int(os.getenv("PARAMETER_RESULT_BATCH_SIZE", "500"))
 
 DATA_DIR = Path(os.getenv("RECON_DATA_DIR", "/data"))
 RAW_DIR = DATA_DIR / "raw"
@@ -130,6 +132,13 @@ def raw_path(scan_id: int, stage: str, tool: str, suffix: str = "txt") -> Path:
 def record_raw(db: Session, scan_id: int, stage: str, tool: str, path: Path) -> None:
     db.add(models.RawOutput(scan_id=scan_id, stage=stage, tool=tool, path=str(path)))
     db.commit()
+
+
+def record_stage_meta(db: Session, scan_id: int, stage: str, tool: str, data: dict) -> Path:
+    path = raw_path(scan_id, stage, tool, "json")
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    record_raw(db, scan_id, stage, tool, path)
+    return path
 
 
 def clear_scan_raw(db: Session, scan_id: int, stage_only: str | None = None) -> None:
@@ -1313,6 +1322,9 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
     if urls:
         query = query.filter(models.HttpxResult.url.in_(urls))
     http_rows = query.all()
+    max_hosts = config.get("max_ffuf_hosts")
+    if max_hosts:
+        http_rows = http_rows[: int(max_hosts)]
     stats = {"total_hosts": len(http_rows), "successful_hosts": 0, "failed_hosts": 0, "errors": [], "mode": mode}
     if not http_rows:
         return stats
@@ -1379,19 +1391,27 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
                 record_raw(db, scan.id, "ffuf", "ffuf-error", result.out)
             flush_results()
     flush_results(force=True)
+    record_stage_meta(db, scan.id, "ffuf", "ffuf-summary", stats)
     return stats
 
 
-def _persist_parameter_texts(db: Session, scan: models.Scan, raw_texts: list[tuple[str, str]]) -> dict:
-    stats = {"total_sources": len(raw_texts), "parameters": 0, "suspicious": 0, "failed": False}
+def _persist_parameter_items(db: Session, scan: models.Scan, sources: Sequence[tuple[str, object]]) -> dict:
+    stats = {"total_sources": len(sources), "parameters": 0, "suspicious": 0, "failed": False, "lines": 0, "parse_errors": 0}
     existing = {
         (r.source_url, r.param, r.method)
         for r in db.query(models.ParameterResult.source_url, models.ParameterResult.param, models.ParameterResult.method).filter_by(scan_id=scan.id).all()
     }
     prior_cache: dict[tuple[str, str], int] = {}
     to_add: list[models.ParameterResult] = []
-    for source, text in raw_texts:
-        parsed_items = parse_arjun_json(text, source) if source.startswith("arjun-") else extract_parameters_from_urls(text, source)
+
+    def flush(force: bool = False) -> None:
+        if not to_add or (not force and len(to_add) < PARAMETER_RESULT_BATCH_SIZE):
+            return
+        db.add_all(to_add)
+        db.commit()
+        to_add.clear()
+
+    def queue(parsed_items: list[dict]) -> None:
         for item in parsed_items:
             key = (item["source_url"], item["param"], item["method"])
             if key in existing:
@@ -1405,14 +1425,63 @@ def _persist_parameter_texts(db: Session, scan: models.Scan, raw_texts: list[tup
             stats["parameters"] += 1
             if item.get("suspicious"):
                 stats["suspicious"] += 1
-            if len(to_add) >= FFUF_RESULT_BATCH_SIZE:
-                for obj in to_add:
-                    db.add(obj)
-                db.commit()
-                to_add.clear()
-    for obj in to_add:
-        db.add(obj)
-    db.commit()
+            flush()
+
+    for source, value in sources:
+        if source.startswith("arjun-"):
+            queue(parse_arjun_json(str(value or ""), source))
+            continue
+        if isinstance(value, Path):
+            try:
+                with value.open("r", encoding="utf-8", errors="ignore") as handle:
+                    for line in handle:
+                        stats["lines"] += 1
+                        try:
+                            queue(extract_parameters_from_urls(line, source))
+                        except Exception:
+                            stats["parse_errors"] += 1
+            except OSError as exc:
+                stats["failed"] = True
+                stats["error"] = str(exc)
+        else:
+            try:
+                queue(extract_parameters_from_urls(str(value or ""), source))
+            except Exception as exc:
+                stats["failed"] = True
+                stats["parse_errors"] += 1
+                stats["error"] = str(exc)
+    flush(force=True)
+    return stats
+
+
+def _persist_parameter_texts(db: Session, scan: models.Scan, raw_texts: list[tuple[str, str]]) -> dict:
+    return _persist_parameter_items(db, scan, raw_texts)
+
+
+def compact_jsonl_raw(path: Path, max_mb: int, strip_keys: set[str] | None = None) -> dict:
+    strip_keys = strip_keys or {"body", "raw"}
+    stats = {"path": str(path), "original_bytes": path.stat().st_size if path.exists() else 0, "compacted": False, "gzip_path": None}
+    if not path.exists() or stats["original_bytes"] <= max_mb * 1024 * 1024:
+        return stats
+    compact = path.with_suffix(path.suffix + ".compact")
+    gz = path.with_suffix(path.suffix + ".gz")
+
+    def scrub(value):
+        if isinstance(value, dict):
+            return {k: scrub(v) for k, v in value.items() if k not in strip_keys}
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    with path.open("r", encoding="utf-8", errors="ignore") as src, compact.open("w", encoding="utf-8") as dst, gzip.open(gz, "wt", encoding="utf-8") as zipped:
+        for line in src:
+            zipped.write(line)
+            try:
+                dst.write(json.dumps(scrub(json.loads(line)), separators=(",", ":")) + "\n")
+            except json.JSONDecodeError:
+                dst.write(line)
+    compact.replace(path)
+    stats.update({"compacted": True, "gzip_path": str(gz), "compacted_bytes": path.stat().st_size})
     return stats
 
 
@@ -1424,7 +1493,10 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
     if urls:
         query = query.filter(models.HttpxResult.url.in_(urls))
     live_urls = [r.url for r in query.all()]
-    raw_texts: list[tuple[str, str]] = []
+    max_katana_urls = config.get("max_katana_urls")
+    if max_katana_urls:
+        live_urls = live_urls[: int(max_katana_urls)]
+    raw_sources: list[tuple[str, object]] = []
     parameter_timeout = int(config.get("parameter_timeout", 240))
     katana_crawl_duration = str(config.get("katana_crawl_duration") or "2m")
 
@@ -1441,7 +1513,7 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
     if stderr:
         raw_path(scan.id, "parameters", "gau-stderr").write_text(stderr, encoding="utf-8")
     record_raw(db, scan.id, "parameters", "gau", gau_out)
-    raw_texts.append(("gau", stdout))
+    raw_sources.append(("gau", stdout))
 
     if live_urls:
         katana_in = raw_path(scan.id, "parameters", "katana-input")
@@ -1470,10 +1542,16 @@ def run_parameters(db: Session, scan: models.Scan, urls: list[str] | None = None
         if not katana_out.exists():
             katana_out.write_text("", encoding="utf-8")
         record_raw(db, scan.id, "parameters", "katana", katana_out)
-        katana_text = katana_out.read_text(errors="ignore")
-        raw_texts.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_text))
+        raw_sources.append(("katana-headless" if config.get("run_katana_headless", False) else "katana", katana_out))
 
-    return _persist_parameter_texts(db, scan, raw_texts)
+    stats = _persist_parameter_items(db, scan, raw_sources)
+    stats["katana_input_urls"] = len(live_urls)
+    if live_urls:
+        compact_stats = compact_jsonl_raw(katana_out, int(config.get("max_katana_output_mb", 250)))
+        stats["katana_raw"] = compact_stats
+        record_stage_meta(db, scan.id, "parameters", "katana-raw-summary", compact_stats)
+    record_stage_meta(db, scan.id, "parameters", "parameters-summary", stats)
+    return stats
 
 
 def run_arjun(db: Session, scan: models.Scan, urls: list[str] | None = None) -> dict:
@@ -1541,7 +1619,11 @@ def run_arjun(db: Session, scan: models.Scan, urls: list[str] | None = None) -> 
 def run_screenshots(db: Session, scan: models.Scan) -> None:
     settings = load_settings()
     command = _command_for_scan(scan.id)
+    config = scan.config or {}
     urls = [r.url for r in db.query(models.HttpxResult).filter(models.HttpxResult.scan_id == scan.id).all()]
+    max_urls = config.get("max_screenshot_urls")
+    if max_urls:
+        urls = urls[: int(max_urls)]
     if not urls:
         return
     infile = raw_path(scan.id, "screenshots", "input")
@@ -1561,13 +1643,22 @@ def run_screenshots(db: Session, scan: models.Scan) -> None:
         raise
     images = list(outdir.glob("*.png")) + list(outdir.glob("*.jpg")) + list(outdir.glob("*.jpeg"))
     existing_urls = {r.url for r in db.query(models.Screenshot.url).filter_by(scan_id=scan.id).all()}
+    saved_urls = set(existing_urls)
     for image in images:
         url = url_by_stem.get(image.stem) or decode_gowitness_stem(image.stem)
         if url in existing_urls:
             continue
         existing_urls.add(url)
+        saved_urls.add(url)
         db.add(models.Screenshot(target_id=scan.target_id, scan_id=scan.id, url=url, image_path=str(image)))
     db.commit()
+    saved_for_input = len([url for url in urls if url in saved_urls])
+    record_stage_meta(db, scan.id, "screenshots", "screenshots-summary", {
+        "input_urls": len(urls),
+        "saved": saved_for_input,
+        "failed": max(0, len(urls) - saved_for_input),
+        "screenshot_files": len(images),
+    })
 
 
 def execute_scan(db: Session, scan_id: int, stage_only: str | None = None) -> None:
