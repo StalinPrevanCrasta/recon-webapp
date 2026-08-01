@@ -6,6 +6,7 @@ import re
 import secrets
 import shutil
 import gzip
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +20,10 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.recon.runner import CommandError, CommandRunner, run_command as _run_command
+from app.recon.normalization import (
+    canonical_asset_key, canonical_endpoint_key, canonicalize_url, is_api_like_endpoint,
+    is_static_or_marketing_url, normalize_indicator, normalize_path_pattern, stable_fingerprint,
+)
 from app.recon.wrappers import (
     build_amass_command, build_arjun_command, build_ffuf_command, build_gau_command, build_gowitness_command, build_httpx_command, build_katana_command, build_naabu_command,
     build_puredns_command, build_subfinder_command, normalize_content_path, parse_ffuf_json, parse_httpx_jsonl,
@@ -166,7 +171,84 @@ def _call_command(command: Callable, cmd: list[str], timeout: int | None = None,
 
 
 def response_signature(item: dict) -> tuple:
-    return (item.get("status_code"), item.get("size"), item.get("words"), item.get("lines"), item.get("body_hash"))
+    return (
+        item.get("status_code"), item.get("size"), item.get("words"), item.get("lines"),
+        (item.get("title") or "").strip().lower(), item.get("redirect_location"), item.get("body_hash"),
+    )
+
+
+def _response_fingerprint_payload(item: dict) -> dict:
+    headers = item.get("response_headers") or {}
+    stable_headers = {
+        str(key).lower(): str(value)
+        for key, value in headers.items()
+        if str(key).lower() not in {"date", "expires", "set-cookie", "x-request-id", "x-correlation-id", "traceparent"}
+    }
+    return {
+        "status_code": item.get("status_code"),
+        "size": item.get("size") if item.get("size") is not None else item.get("response_size"),
+        "words": item.get("words"),
+        "lines": item.get("lines"),
+        "title": (item.get("title") or "").strip() or None,
+        "redirect_location": item.get("redirect_location") or item.get("final_url"),
+        "body_hash": item.get("body_hash"),
+        "headers_hash": stable_fingerprint(stable_headers) if stable_headers else None,
+        "content_type": item.get("content_type") or stable_headers.get("content-type"),
+        "certificate_fingerprint": item.get("certificate_fingerprint"),
+    }
+
+
+def get_or_create_response_fingerprint(db: Session, item: dict, cache: dict[str, int]) -> int:
+    payload = _response_fingerprint_payload(item)
+    key = stable_fingerprint(payload)
+    if key in cache:
+        return cache[key]
+    existing = db.query(models.ResponseFingerprint).filter_by(fingerprint_key=key).first()
+    if existing:
+        cache[key] = existing.id
+        return existing.id
+    fingerprint = models.ResponseFingerprint(fingerprint_key=key, **payload)
+    db.add(fingerprint)
+    db.flush()
+    cache[key] = fingerprint.id
+    return fingerprint.id
+
+
+def noise_score(item: dict, *, duplicate_count: int = 1, kind: str = "response") -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    if duplicate_count > 1:
+        score += min(35, 5 + duplicate_count)
+        reasons.append(f"{duplicate_count} equivalent observations")
+    if item.get("confidence") == "filtered":
+        score += 50
+        reasons.append("wildcard-like response")
+    haystack = " ".join(str(value or "") for value in (
+        item.get("title"), item.get("evidence"), item.get("filtered_reason"),
+    )).lower()
+    if re.search(r"access denied|request blocked|captcha|checking your browser|cloudflare|akamai.*reference", haystack):
+        score += 25
+        reasons.append("generic WAF or bot response")
+    candidate_url = item.get("url") or item.get("source_url") or item.get("indicator")
+    if is_static_or_marketing_url(candidate_url):
+        score += 25 if kind == "js" else 15
+        reasons.append("static or marketing asset")
+    return min(100, score), reasons
+
+
+def novelty_score(*, is_new_identity: bool, new_fingerprint: bool = False, new_attributes: list[str] | None = None) -> tuple[int, list[str]]:
+    reasons: list[str] = []
+    score = 0
+    if is_new_identity:
+        score += 50
+        reasons.append("new identity")
+    if new_fingerprint:
+        score += 25
+        reasons.append("new response fingerprint")
+    for attribute in new_attributes or []:
+        score += 10
+        reasons.append(f"new {attribute}")
+    return min(100, score), reasons
 
 
 def probe_random_paths(base_url: str, count: int = 3, headers: dict[str, str] | None = None, proxy: str | None = None, timeout: int = 10) -> list[dict]:
@@ -178,12 +260,15 @@ def probe_random_paths(base_url: str, count: int = 3, headers: dict[str, str] | 
             response = pyhttpx.get(url, headers=headers or {}, proxy=proxy, follow_redirects=False, timeout=timeout)
             body = response.content or b""
             text = body.decode(response.encoding or "utf-8", errors="ignore")
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
             rows.append({
                 "url": url, "path": path, "status_code": response.status_code,
                 "size": len(body), "words": len(text.split()), "lines": len(text.splitlines()),
                 "content_type": response.headers.get("content-type"),
                 "redirect_location": response.headers.get("location"),
                 "body_hash": hashlib.sha256(body).hexdigest(),
+                "body_sample": re.sub(r"\s+", " ", text).strip()[:4096],
+                "title": re.sub(r"\s+", " ", title_match.group(1)).strip()[:512] if title_match else None,
             })
         except Exception as exc:
             rows.append({"url": url, "path": path, "error": str(exc)})
@@ -194,7 +279,7 @@ def derive_ffuf_filters(baseline: list[dict]) -> dict[str, str]:
     valid = [row for row in baseline if not row.get("error")]
     if len(valid) < 2:
         return {}
-    keys = ["status_code", "size", "words", "lines", "body_hash"]
+    keys = ["status_code", "size", "words", "lines", "title", "redirect_location", "body_hash"]
     if not all(tuple(row.get(k) for k in keys) == tuple(valid[0].get(k) for k in keys) for row in valid[1:]):
         return {}
     filters: dict[str, str] = {}
@@ -209,11 +294,29 @@ def derive_ffuf_filters(baseline: list[dict]) -> dict[str, str]:
 
 def classify_ffuf_result(result: dict, baseline: list[dict]) -> dict:
     classified = dict(result)
-    result_tuple = (result.get("status_code"), result.get("size"), result.get("words"), result.get("lines"))
-    baseline_tuples = {(row.get("status_code"), row.get("size"), row.get("words"), row.get("lines")) for row in baseline if not row.get("error")}
-    if result_tuple in baseline_tuples:
+    valid = [row for row in baseline if not row.get("error")]
+    result_tuple = (
+        result.get("status_code"), result.get("size"), result.get("words"), result.get("lines"),
+        (result.get("title") or "").strip().lower(), result.get("redirect_location"),
+    )
+    baseline_tuples = {
+        (
+            row.get("status_code"), row.get("size"), row.get("words"), row.get("lines"),
+            (row.get("title") or "").strip().lower(), row.get("redirect_location"),
+        )
+        for row in valid
+    }
+    body_sample = result.get("body_sample")
+    body_similarity = max(
+        (
+            SequenceMatcher(None, body_sample, row.get("body_sample") or "").ratio()
+            for row in valid if body_sample and row.get("body_sample")
+        ),
+        default=0.0,
+    )
+    if result_tuple in baseline_tuples or body_similarity >= 0.92:
         classified["confidence"] = "filtered"
-        classified["filtered_reason"] = "matches wildcard baseline response"
+        classified["filtered_reason"] = "matches wildcard baseline response" if result_tuple in baseline_tuples else f"body is {body_similarity:.0%} similar to wildcard baseline"
     elif result.get("status_code") in {200, 201, 204, 301, 302, 307, 308}:
         classified["confidence"] = "confirmed"
         classified["filtered_reason"] = None
@@ -596,6 +699,39 @@ def run_naabu(db: Session, scan: models.Scan) -> list[dict]:
     return rows
 
 
+def probe_candidate_response(url: str, headers: dict[str, str] | None = None, proxy: str | None = None, timeout: int = 10) -> dict:
+    response = pyhttpx.get(url, headers=headers or {}, proxy=proxy, follow_redirects=False, timeout=timeout)
+    body = response.content or b""
+    text = body.decode(response.encoding or "utf-8", errors="ignore")
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    return {
+        "status_code": response.status_code,
+        "size": len(body),
+        "words": len(text.split()),
+        "lines": len(text.splitlines()),
+        "content_type": response.headers.get("content-type"),
+        "redirect_location": response.headers.get("location"),
+        "body_hash": hashlib.sha256(body).hexdigest(),
+        "body_sample": re.sub(r"\s+", " ", text).strip()[:4096],
+        "title": re.sub(r"\s+", " ", title_match.group(1)).strip()[:512] if title_match else None,
+    }
+
+
+def _near_wildcard_baseline(result: dict, baseline: list[dict]) -> bool:
+    for row in baseline:
+        if row.get("error") or result.get("status_code") != row.get("status_code"):
+            continue
+        size = result.get("size")
+        baseline_size = row.get("size")
+        words = result.get("words")
+        baseline_words = row.get("words")
+        size_close = size is not None and baseline_size is not None and abs(size - baseline_size) <= max(32, int(max(size, baseline_size) * 0.05))
+        words_close = words is not None and baseline_words is not None and abs(words - baseline_words) <= max(3, int(max(words, baseline_words) * 0.08))
+        if size_close or words_close:
+            return True
+    return False
+
+
 def _host_from_url(value: str) -> str:
     parsed = urlparse(value if "://" in value else f"//{value}")
     return (parsed.hostname or value).lower()
@@ -687,8 +823,36 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
         outfile.write_text("")
     record_raw(db, scan.id, "httpx", "httpx", outfile)
     rows = parse_httpx_jsonl(outfile.read_text(errors="ignore"))
+    grouped: dict[str, dict] = {}
+    for item in rows:
+        if not item.get("url"):
+            continue
+        asset_key = item.get("asset_key") or canonical_asset_key(item["url"])
+        item["asset_key"] = asset_key
+        current = grouped.get(asset_key)
+        if current is None:
+            grouped[asset_key] = item
+            continue
+        current["variants"] = (current.get("variants") or []) + (item.get("variants") or [])
+        current["observation_count"] = len(current["variants"])
+        current["ports"] = sorted(set(current.get("ports") or []) | set(item.get("ports") or []))
+        current["tech"] = sorted(set(current.get("tech") or []) | set(item.get("tech") or []))
+        current["redirect_hops"] = current.get("redirect_hops") or item.get("redirect_hops") or []
+        current["final_url"] = current.get("final_url") or item.get("final_url")
+    rows = list(grouped.values())
     urls = []
-    existing_urls = {r.url for r in db.query(models.HttpxResult.url).filter_by(scan_id=scan.id).all()}
+    existing_assets = {
+        r.asset_key or canonical_asset_key(r.url)
+        for r in db.query(models.HttpxResult).filter_by(scan_id=scan.id).all()
+    }
+    prior_rows = db.query(models.HttpxResult).filter(models.HttpxResult.target_id == scan.target_id, models.HttpxResult.scan_id != scan.id).all()
+    prior_assets = {r.asset_key or canonical_asset_key(r.url) for r in prior_rows}
+    prior_fingerprint_ids = {r.fingerprint_id for r in prior_rows if r.fingerprint_id}
+    prior_tech = {tech for r in prior_rows for tech in (r.tech or [])}
+    prior_statuses = {r.status_code for r in prior_rows if r.status_code is not None}
+    prior_certificates = {r.certificate_fingerprint for r in prior_rows if r.certificate_fingerprint}
+    prior_header_names = {str(key).lower() for r in prior_rows for key in (r.response_headers or {})}
+    fingerprint_cache: dict[str, int] = {}
     prior_map: dict[str, int] = {}
     to_add = []
     for item in rows:
@@ -701,13 +865,30 @@ def run_httpx(db: Session, scan: models.Scan) -> list[str]:
         item["response_headers"] = response_headers
         item["ports"] = ports
         item["fingerprints"] = fingerprint_host(item, response_headers, ports)
+        item["fingerprint_id"] = get_or_create_response_fingerprint(db, item, fingerprint_cache)
+        item["observation_count"] = max(1, len(item.get("variants") or []))
+        item["noise_score"], item["noise_reasons"] = noise_score(item, duplicate_count=item["observation_count"], kind="http")
+        new_attributes = []
+        if any(tech not in prior_tech for tech in item.get("tech") or []):
+            new_attributes.append("technology")
+        if item.get("status_code") not in prior_statuses:
+            new_attributes.append("status")
+        if any(str(key).lower() not in prior_header_names for key in response_headers):
+            new_attributes.append("header")
+        if item.get("certificate_fingerprint") and item["certificate_fingerprint"] not in prior_certificates:
+            new_attributes.append("certificate")
+        item["novelty_score"], item["novelty_reasons"] = novelty_score(
+            is_new_identity=item["asset_key"] not in prior_assets,
+            new_fingerprint=item["fingerprint_id"] not in prior_fingerprint_ids,
+            new_attributes=new_attributes,
+        )
         urls.append(url)
-        if url in existing_urls:
+        if item["asset_key"] in existing_assets:
             continue
-        if url not in prior_map:
-            prior = db.query(models.HttpxResult).filter_by(target_id=scan.target_id, url=url).order_by(models.HttpxResult.id.asc()).first()
-            prior_map[url] = prior.first_seen_scan_id if prior else scan.id
-        to_add.append(models.HttpxResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_map[url], headers_sent={"User-Agent": settings.user_agent, **headers}, **item))
+        if item["asset_key"] not in prior_map:
+            prior = next((row for row in prior_rows if (row.asset_key or canonical_asset_key(row.url)) == item["asset_key"]), None)
+            prior_map[item["asset_key"]] = prior.first_seen_scan_id if prior else scan.id
+        to_add.append(models.HttpxResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_map[item["asset_key"]], headers_sent={"User-Agent": settings.user_agent, **headers}, **item))
     for obj in to_add:
         db.add(obj)
     db.commit()
@@ -802,7 +983,7 @@ def analyze_js_text(text: str, source_url: str, page_url: str | None, target_dom
     findings: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(kind: str, severity: str, indicator: str, match, tags: list[str], confidence: str = "heuristic"):
+    def add(kind: str, severity: str, indicator: str, match, tags: list[str], confidence: str = "heuristic", probable: bool = False):
         key = (kind, indicator)
         if key in seen:
             return
@@ -818,6 +999,8 @@ def analyze_js_text(text: str, source_url: str, page_url: str | None, target_dom
             "line": line,
             "column": col,
             "confidence": confidence,
+            "classification": "probable_vulnerability" if probable else "interesting_lead",
+            "probable_vulnerability": probable,
             "tags": tags,
         })
 
@@ -830,8 +1013,11 @@ def analyze_js_text(text: str, source_url: str, page_url: str | None, target_dom
         absolute = urljoin(page_url or source_url, endpoint)
         if endpoint.startswith(("http://", "https://", "//")) and not _is_same_target_url(absolute, target_domain):
             continue
-        severity = "medium" if re.search(r"/(?:admin|internal|private|oauth|sso|graphql)", endpoint, re.I) else "low"
-        add("endpoint", severity, endpoint, match, ["endpoint", "api"], "pattern")
+        if is_static_or_marketing_url(absolute):
+            continue
+        api_like = is_api_like_endpoint(absolute)
+        severity = "medium" if api_like and re.search(r"/(?:admin|internal|private|oauth|sso|graphql)", endpoint, re.I) else "low"
+        add("endpoint", severity, endpoint, match, ["endpoint", "api"] if api_like else ["endpoint", "route"], "pattern")
 
     if re.search(r"sourceMappingURL=.*\.map", text, re.I) or source_url.endswith(".map"):
         add("sourcemap", "medium", "Source map reference", re.search(r"sourceMappingURL=.*", text, re.I) or re.match(r".*", source_url), ["source-map", "review"], "pattern")
@@ -851,7 +1037,7 @@ def analyze_js_text(text: str, source_url: str, page_url: str | None, target_dom
     if source_hits and sink_hits:
         indicator = f"{source_hits[0]} → {sink_hits[0]}"
         first_source = next(p.search(text) for _, p in JS_SOURCE_PATTERNS if p.search(text))
-        add("source-sink", "high", indicator, first_source, ["source-sink", "xss", "manual-review"])
+        add("source-sink", "medium", indicator, first_source, ["source-sink", "xss", "manual-review"], "heuristic")
 
     return findings
 
@@ -942,6 +1128,8 @@ def parse_trufflehog_json(text: str, file_to_url: dict[str, dict]) -> list[dict]
             "line": line,
             "column": None,
             "confidence": confidence,
+            "classification": "probable_vulnerability" if verified else "interesting_lead",
+            "probable_vulnerability": verified,
             "tags": ["secret", "trufflehog", confidence],
         })
     return findings
@@ -989,11 +1177,23 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
         query = query.filter(models.HttpxResult.url.in_(urls))
     hosts = query.order_by(models.HttpxResult.status_code.asc()).limit(max_hosts).all()
     manifest = {"hosts": len(hosts), "scripts": [], "trufflehog": {}, "errors": []}
-    stats = {"hosts": len(hosts), "bundles": 0, "findings": 0, "high": 0, "trufflehog": 0, "failed": False}
+    stats = {"hosts": len(hosts), "bundles": 0, "bundle_observations": 0, "duplicate_bundles": 0, "findings": 0, "high": 0, "trufflehog": 0, "failed": False}
     file_to_url: dict[str, dict] = {}
+    current_findings = db.query(models.JsFinding).filter_by(scan_id=scan.id).all()
     existing = {
-        (r.source_url, r.finding_type, r.indicator)
-        for r in db.query(models.JsFinding.source_url, models.JsFinding.finding_type, models.JsFinding.indicator).filter_by(scan_id=scan.id).all()
+        (r.content_hash or hashlib.sha256((r.source_url or "").encode()).hexdigest(), r.finding_type, r.normalized_indicator or normalize_indicator(r.indicator))
+        for r in current_findings
+    }
+    findings_by_hash: dict[str, list[models.JsFinding]] = {}
+    for row in current_findings:
+        if row.content_hash:
+            findings_by_hash.setdefault(row.content_hash, []).append(row)
+    analyzed_hashes = {r.content_hash for r in current_findings if r.content_hash}
+    prior_findings = db.query(models.JsFinding).filter(models.JsFinding.target_id == scan.target_id, models.JsFinding.scan_id != scan.id).all()
+    prior_hashes = {r.content_hash for r in prior_findings if r.content_hash}
+    prior_js_keys = {
+        (r.content_hash, r.finding_type, r.normalized_indicator or normalize_indicator(r.indicator))
+        for r in prior_findings if r.content_hash
     }
     pending = []
     for host in hosts:
@@ -1010,8 +1210,6 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
             sources.append((f"{host.url}#inline-script-{idx}", script_text))
         for script_url, inline_text in sources:
             ensure_scan_not_stopped(db, scan)
-            safe_name = hashlib.sha256(script_url.encode("utf-8")).hexdigest()[:16]
-            out = raw_path(scan.id, "js_intel", safe_name, "js")
             try:
                 if inline_text is None:
                     if not _is_same_target_url(script_url, scan.target.domain):
@@ -1019,19 +1217,52 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
                     text, script_meta = _fetch_text(script_url, settings, per_request_timeout, max_bytes)
                 else:
                     text, script_meta = inline_text, {"status_code": meta["status_code"], "content_type": "inline-script", "bytes": len(inline_text)}
+                content_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+                safe_name = content_hash[:20]
+                out = raw_path(scan.id, "js_intel", safe_name, "js")
+                variant = {"page_url": host.url, "source_url": script_url}
+                stats["bundle_observations"] += 1
+                if content_hash in analyzed_hashes:
+                    stats["duplicate_bundles"] += 1
+                    for stored in findings_by_hash.get(content_hash, []):
+                        variants = list(stored.variants or [])
+                        if variant not in variants:
+                            variants.append(variant)
+                            stored.variants = variants
+                            stored.observation_count = len(variants)
+                            stored.noise_score, stored.noise_reasons = noise_score(
+                                {"source_url": stored.source_url},
+                                duplicate_count=stored.observation_count,
+                                kind="js",
+                            )
+                    manifest["scripts"].append({"page_url": host.url, "source_url": script_url, "content_hash": content_hash, "duplicate": True, **script_meta})
+                    continue
+                analyzed_hashes.add(content_hash)
                 out.write_text(text, encoding="utf-8", errors="ignore")
                 file_to_url[str(out)] = {"page_url": host.url, "source_url": script_url, "file_path": str(out)}
                 file_to_url[str(out).replace("\\", "/")] = {"page_url": host.url, "source_url": script_url, "file_path": str(out)}
                 stats["bundles"] += 1
-                manifest["scripts"].append({"page_url": host.url, "source_url": script_url, "path": str(out), **script_meta})
+                manifest["scripts"].append({"page_url": host.url, "source_url": script_url, "path": str(out), "content_hash": content_hash, "duplicate": False, **script_meta})
                 for finding in analyze_js_text(text, script_url, host.url, scan.target.domain):
-                    key = (finding["source_url"], finding["finding_type"], finding["indicator"])
+                    normalized = normalize_indicator(finding["indicator"])
+                    key = (content_hash, finding["finding_type"], normalized)
                     if key in existing:
                         continue
                     existing.add(key)
-                    if finding["severity"] == "high":
+                    if finding["severity"] == "high" and finding.get("probable_vulnerability"):
                         stats["high"] += 1
-                    pending.append(models.JsFinding(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=scan.id, file_path=str(out), **finding))
+                    finding["content_hash"] = content_hash
+                    finding["normalized_indicator"] = normalized
+                    finding["variants"] = [variant]
+                    finding["observation_count"] = 1
+                    finding["noise_score"], finding["noise_reasons"] = noise_score(finding, kind="js")
+                    finding["novelty_score"], finding["novelty_reasons"] = novelty_score(
+                        is_new_identity=key not in prior_js_keys,
+                        new_fingerprint=content_hash not in prior_hashes,
+                    )
+                    obj = models.JsFinding(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=scan.id, file_path=str(out), **finding)
+                    findings_by_hash.setdefault(content_hash, []).append(obj)
+                    pending.append(obj)
                     if len(pending) >= JS_INTEL_BATCH_SIZE:
                         db.add_all(pending)
                         db.commit()
@@ -1072,13 +1303,30 @@ def run_js_intel(db: Session, scan: models.Scan, urls: list[str] | None = None) 
         trufflehog_findings = parse_trufflehog_json(stdout or "", file_to_url)
         stats["trufflehog"] = len(trufflehog_findings)
         for finding in trufflehog_findings:
-            key = (finding["source_url"], finding["finding_type"], finding["indicator"])
+            file_path = finding.get("file_path")
+            try:
+                content_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest() if file_path else hashlib.sha256(finding["source_url"].encode()).hexdigest()
+            except OSError:
+                content_hash = hashlib.sha256(finding["source_url"].encode()).hexdigest()
+            normalized = normalize_indicator(finding["indicator"])
+            key = (content_hash, finding["finding_type"], normalized)
             if key in existing:
                 continue
             existing.add(key)
-            if finding["severity"] == "high":
+            if finding["severity"] == "high" and finding.get("probable_vulnerability"):
                 stats["high"] += 1
             file_path = finding.pop("file_path", None)
+            finding.update({
+                "content_hash": content_hash,
+                "normalized_indicator": normalized,
+                "variants": [{"page_url": finding.get("page_url"), "source_url": finding["source_url"]}],
+                "observation_count": 1,
+            })
+            finding["noise_score"], finding["noise_reasons"] = noise_score(finding, kind="js")
+            finding["novelty_score"], finding["novelty_reasons"] = novelty_score(
+                is_new_identity=key not in prior_js_keys,
+                new_fingerprint=content_hash not in prior_hashes,
+            )
             pending.append(models.JsFinding(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=scan.id, file_path=file_path, **finding))
             if len(pending) >= JS_INTEL_BATCH_SIZE:
                 db.add_all(pending)
@@ -1283,19 +1531,36 @@ def _ffuf_host(context: FfufHostContext, command: Callable) -> FfufHostResult:
             filter_words, filter_lines,
         )
         _call_command(command, cmd, timeout=int(context.config.get("ffuf_host_timeout", 3600)))
-        seen_keys: set[tuple] = set()
-        items = []
+        items_by_key: dict[tuple, dict] = {}
         for item in parse_ffuf_json(out.read_text(errors="ignore")):
             if not item.get("url"):
                 continue
             item = classify_ffuf_result(item, baseline)
+            if item.get("confidence") != "filtered" and _near_wildcard_baseline(item, baseline):
+                try:
+                    confirmed = probe_candidate_response(item["url"], context.headers, context.proxy)
+                    item.update(confirmed)
+                    item = classify_ffuf_result(item, baseline)
+                except Exception:
+                    pass
             item["normalized_path"] = normalize_content_path(item.get("normalized_path") or item.get("path"))
             item["method"] = item.get("method") or "GET"
-            dedupe_key = (context.url, item.get("normalized_path"), item.get("method"))
-            if dedupe_key in seen_keys:
+            dedupe_key = (*canonical_endpoint_key(context.url + (item.get("normalized_path") or ""), item["method"]),)
+            variant = {
+                "url": item["url"],
+                "status_code": item.get("status_code"),
+                "size": item.get("size"),
+                "words": item.get("words"),
+            }
+            if dedupe_key in items_by_key:
+                stored = items_by_key[dedupe_key]
+                stored["variants"].append(variant)
+                stored["observation_count"] = len(stored["variants"])
                 continue
-            seen_keys.add(dedupe_key)
-            items.append(item)
+            item["variants"] = [variant]
+            item["observation_count"] = 1
+            items_by_key[dedupe_key] = item
+        items = list(items_by_key.values())
         return FfufHostResult(context.url, out, baseline_out=baseline_out, items=items)
     except Exception as e:
         err = {"url": context.url, "command": cmd, "error": str(e), "error_type": type(e).__name__}
@@ -1330,9 +1595,13 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
         return stats
 
     existing_paths = {
-        (r.base_url, r.normalized_path, r.method)
+        (canonical_asset_key(r.base_url), r.normalized_path, r.method)
         for r in db.query(models.DirbResult.base_url, models.DirbResult.normalized_path, models.DirbResult.method).filter_by(scan_id=scan.id).all()
     }
+    prior_dir_rows = db.query(models.DirbResult).filter(models.DirbResult.target_id == scan.target_id, models.DirbResult.scan_id != scan.id).all()
+    prior_dir_keys = {(canonical_asset_key(r.base_url), r.normalized_path, r.method) for r in prior_dir_rows}
+    prior_dir_fingerprints = {r.fingerprint_id for r in prior_dir_rows if r.fingerprint_id}
+    fingerprint_cache: dict[str, int] = {}
     command = _command_for_scan(scan.id)
     contexts = [
         FfufHostContext(
@@ -1362,16 +1631,25 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
         if result.items is None:
             return
         for item in result.items:
-            dedupe_key = (result.url, item.get("normalized_path"), item.get("method"))
+            dedupe_key = (canonical_asset_key(result.url), item.get("normalized_path"), item.get("method"))
             if dedupe_key in existing_paths:
                 continue
             existing_paths.add(dedupe_key)
             normalized_path = str(item.get("normalized_path") or "")
             method = str(item.get("method") or "GET")
-            cache_key = (normalized_path, method)
+            cache_key = dedupe_key
             if cache_key not in prior_dirb_cache:
-                prior = db.query(models.DirbResult).filter_by(target_id=scan.target_id, normalized_path=normalized_path, method=method).order_by(models.DirbResult.id.asc()).first()
+                prior = next((row for row in prior_dir_rows if (canonical_asset_key(row.base_url), row.normalized_path, row.method) == dedupe_key), None)
                 prior_dirb_cache[cache_key] = prior.first_seen_scan_id if prior else scan.id
+            item.pop("body_sample", None)
+            item["fingerprint_id"] = get_or_create_response_fingerprint(db, item, fingerprint_cache)
+            item["noise_score"], item["noise_reasons"] = noise_score(
+                item, duplicate_count=int(item.get("observation_count") or 1), kind="dir"
+            )
+            item["novelty_score"], item["novelty_reasons"] = novelty_score(
+                is_new_identity=dedupe_key not in prior_dir_keys,
+                new_fingerprint=item["fingerprint_id"] not in prior_dir_fingerprints,
+            )
             to_add.append(models.DirbResult(target_id=scan.target_id, scan_id=scan.id, base_url=result.url, first_seen_scan_id=prior_dirb_cache[cache_key], headers_sent=settings.headers, **item))
             flush_results()
 
@@ -1397,11 +1675,28 @@ def run_ffuf(db: Session, scan: models.Scan, urls: list[str] | None = None) -> d
 
 def _persist_parameter_items(db: Session, scan: models.Scan, sources: Sequence[tuple[str, object]]) -> dict:
     stats = {"total_sources": len(sources), "parameters": 0, "suspicious": 0, "failed": False, "lines": 0, "parse_errors": 0}
-    existing = {
-        (r.source_url, r.param, r.method)
-        for r in db.query(models.ParameterResult.source_url, models.ParameterResult.param, models.ParameterResult.method).filter_by(scan_id=scan.id).all()
+    current_rows = db.query(models.ParameterResult).filter_by(scan_id=scan.id).all()
+    objects_by_key = {
+        (
+            r.asset_key or canonical_asset_key(r.source_url),
+            r.normalized_path or normalize_path_pattern(r.source_url),
+            r.method,
+            r.param,
+        ): r
+        for r in current_rows
     }
-    prior_cache: dict[tuple[str, str], int] = {}
+    existing = set(objects_by_key)
+    prior_rows = db.query(models.ParameterResult).filter(models.ParameterResult.target_id == scan.target_id, models.ParameterResult.scan_id != scan.id).all()
+    prior_by_key = {
+        (
+            r.asset_key or canonical_asset_key(r.source_url),
+            r.normalized_path or normalize_path_pattern(r.source_url),
+            r.method,
+            r.param,
+        ): r
+        for r in prior_rows
+    }
+    prior_cache: dict[tuple[str, str, str, str], int] = {}
     to_add: list[models.ParameterResult] = []
 
     def flush(force: bool = False) -> None:
@@ -1413,15 +1708,41 @@ def _persist_parameter_items(db: Session, scan: models.Scan, sources: Sequence[t
 
     def queue(parsed_items: list[dict]) -> None:
         for item in parsed_items:
-            key = (item["source_url"], item["param"], item["method"])
+            item["asset_key"] = item.get("asset_key") or canonical_asset_key(item["source_url"])
+            item["normalized_path"] = item.get("normalized_path") or normalize_path_pattern(item["source_url"])
+            item["method"] = str(item.get("method") or "GET").upper()
+            key = (item["asset_key"], item["normalized_path"], item["method"], item["param"])
+            variant = {
+                "source_url": item["source_url"],
+                "sample_value": item.get("sample_value"),
+                "source": item.get("source"),
+            }
             if key in existing:
+                stored = objects_by_key.get(key)
+                if stored is not None:
+                    variants = list(stored.variants or [])
+                    if variant not in variants:
+                        variants.append(variant)
+                    stored.variants = variants
+                    stored.observation_count = int(stored.observation_count or 1) + 1
+                    stored.noise_score, stored.noise_reasons = noise_score(
+                        {"source_url": stored.source_url},
+                        duplicate_count=stored.observation_count,
+                        kind="parameter",
+                    )
                 continue
             existing.add(key)
-            cache_key = (item["param"], item["method"])
+            cache_key = key
             if cache_key not in prior_cache:
-                prior = db.query(models.ParameterResult).filter_by(target_id=scan.target_id, param=item["param"], method=item["method"]).order_by(models.ParameterResult.id.asc()).first()
+                prior = prior_by_key.get(key)
                 prior_cache[cache_key] = prior.first_seen_scan_id if prior else scan.id
-            to_add.append(models.ParameterResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_cache[cache_key], **item))
+            item["variants"] = [variant]
+            item["observation_count"] = 1
+            item["noise_score"], item["noise_reasons"] = noise_score(item, kind="parameter")
+            item["novelty_score"], item["novelty_reasons"] = novelty_score(is_new_identity=key not in prior_by_key)
+            obj = models.ParameterResult(target_id=scan.target_id, scan_id=scan.id, first_seen_scan_id=prior_cache[cache_key], **item)
+            objects_by_key[key] = obj
+            to_add.append(obj)
             stats["parameters"] += 1
             if item.get("suspicious"):
                 stats["suspicious"] += 1

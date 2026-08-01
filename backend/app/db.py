@@ -29,6 +29,7 @@ def _sqlite_add_missing_columns() -> None:
         "normalized_path": "VARCHAR(1024)",
         "method": "VARCHAR(16) DEFAULT 'GET'",
         "content_type": "VARCHAR(255)",
+        "title": "TEXT",
         "redirect_location": "TEXT",
         "duration_ms": "INTEGER",
         "body_hash": "VARCHAR(128)",
@@ -36,6 +37,10 @@ def _sqlite_add_missing_columns() -> None:
         "filtered_reason": "TEXT",
     }
     with engine.begin() as conn:
+        if "response_fingerprints" in tables:
+            existing_fingerprints = {col["name"] for col in inspector.get_columns("response_fingerprints")}
+            if "certificate_fingerprint" not in existing_fingerprints:
+                conn.execute(text("ALTER TABLE response_fingerprints ADD COLUMN certificate_fingerprint VARCHAR(128)"))
         for name, ddl in dirb_columns.items():
             if name not in existing_dirb:
                 conn.execute(text(f"ALTER TABLE dirb_results ADD COLUMN {name} {ddl}"))
@@ -48,10 +53,34 @@ def _sqlite_add_missing_columns() -> None:
                 "fingerprints": "JSON DEFAULT '[]'",
                 "response_headers": "JSON DEFAULT '{}'",
                 "ports": "JSON DEFAULT '[]'",
+                "asset_key": "VARCHAR(1024)",
+                "variants": "JSON DEFAULT '[]'",
+                "observation_count": "INTEGER DEFAULT 1",
+                "redirect_hops": "JSON DEFAULT '[]'",
+                "final_url": "VARCHAR(2048)",
+                "certificate_fingerprint": "VARCHAR(128)",
+                "fingerprint_id": "INTEGER",
+                "noise_score": "INTEGER DEFAULT 0",
+                "noise_reasons": "JSON DEFAULT '[]'",
+                "novelty_score": "INTEGER DEFAULT 0",
+                "novelty_reasons": "JSON DEFAULT '[]'",
             }
             for name, ddl in httpx_columns.items():
                 if name not in existing_httpx:
                     conn.execute(text(f"ALTER TABLE httpx_results ADD COLUMN {name} {ddl}"))
+        existing_dirb = {col["name"] for col in inspector.get_columns("dirb_results")}
+        extra_dirb_columns = {
+            "fingerprint_id": "INTEGER",
+            "variants": "JSON DEFAULT '[]'",
+            "observation_count": "INTEGER DEFAULT 1",
+            "noise_score": "INTEGER DEFAULT 0",
+            "noise_reasons": "JSON DEFAULT '[]'",
+            "novelty_score": "INTEGER DEFAULT 0",
+            "novelty_reasons": "JSON DEFAULT '[]'",
+        }
+        for name, ddl in extra_dirb_columns.items():
+            if name not in existing_dirb:
+                conn.execute(text(f"ALTER TABLE dirb_results ADD COLUMN {name} {ddl}"))
         if "port_results" not in tables:
             conn.execute(text("""
                 CREATE TABLE port_results (
@@ -109,6 +138,21 @@ def _sqlite_add_missing_columns() -> None:
             conn.execute(text("CREATE INDEX ix_parameter_results_source ON parameter_results (source)"))
             conn.execute(text("CREATE INDEX ix_parameter_results_suspicious ON parameter_results (suspicious)"))
             conn.execute(text("CREATE INDEX ix_parameter_results_first_seen_scan_id ON parameter_results (first_seen_scan_id)"))
+        else:
+            existing_parameters = {col["name"] for col in inspector.get_columns("parameter_results")}
+            parameter_columns = {
+                "asset_key": "VARCHAR(1024)",
+                "normalized_path": "VARCHAR(1024)",
+                "variants": "JSON DEFAULT '[]'",
+                "observation_count": "INTEGER DEFAULT 1",
+                "noise_score": "INTEGER DEFAULT 0",
+                "noise_reasons": "JSON DEFAULT '[]'",
+                "novelty_score": "INTEGER DEFAULT 0",
+                "novelty_reasons": "JSON DEFAULT '[]'",
+            }
+            for name, ddl in parameter_columns.items():
+                if name not in existing_parameters:
+                    conn.execute(text(f"ALTER TABLE parameter_results ADD COLUMN {name} {ddl}"))
         if "js_findings" not in tables:
             conn.execute(text("""
                 CREATE TABLE js_findings (
@@ -144,6 +188,23 @@ def _sqlite_add_missing_columns() -> None:
             conn.execute(text("CREATE INDEX ix_js_findings_indicator ON js_findings (indicator)"))
             conn.execute(text("CREATE INDEX ix_js_findings_confidence ON js_findings (confidence)"))
             conn.execute(text("CREATE INDEX ix_js_findings_first_seen_scan_id ON js_findings (first_seen_scan_id)"))
+        else:
+            existing_js = {col["name"] for col in inspector.get_columns("js_findings")}
+            js_columns = {
+                "content_hash": "VARCHAR(64)",
+                "normalized_indicator": "VARCHAR(1024)",
+                "classification": "VARCHAR(32) DEFAULT 'interesting_lead'",
+                "probable_vulnerability": "BOOLEAN DEFAULT 0",
+                "variants": "JSON DEFAULT '[]'",
+                "observation_count": "INTEGER DEFAULT 1",
+                "noise_score": "INTEGER DEFAULT 0",
+                "noise_reasons": "JSON DEFAULT '[]'",
+                "novelty_score": "INTEGER DEFAULT 0",
+                "novelty_reasons": "JSON DEFAULT '[]'",
+            }
+            for name, ddl in js_columns.items():
+                if name not in existing_js:
+                    conn.execute(text(f"ALTER TABLE js_findings ADD COLUMN {name} {ddl}"))
         if "nuclei_findings" not in tables:
             conn.execute(text("""
                 CREATE TABLE nuclei_findings (

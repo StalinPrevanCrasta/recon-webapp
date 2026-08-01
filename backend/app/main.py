@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
@@ -24,6 +25,7 @@ from app.schemas import ArjunRunRequest, InterestingPatch, PlaygroundRequestSend
 from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
+from app.recon.normalization import canonical_asset_key, normalize_indicator, normalize_path_pattern
 from app.recon.runner import CommandError, cancel_scan, run_command
 from app.recon.wrappers import build_arjun_command, parse_arjun_json
 from app.recon.wordlists import FFUF_WORDLIST_UNAVAILABLE, ffuf_wordlist_status, resolve_ffuf_wordlist
@@ -547,13 +549,49 @@ def stage_statuses(db: Session, scan: models.Scan, subdomains: list, http: list,
         "naabu": {"status": stage_state("naabu", 0), "results": len([r for r in raw_by_stage.get("naabu", []) if r.tool == "naabu"])},
         "httpx": {"status": stage_state("httpx", len(http)), "results": len(http), "total": len(subdomains)},
         "wappalyzer": {"status": stage_state("wappalyzer", len([h for h in http if h.get("tech")])), "results": len([h for h in http if h.get("tech")]), "total": len(http)},
-        "js_intel": {"status": stage_state("js_intel", len(js_findings)), "results": len(js_findings), "high": len([j for j in js_findings if j.get("severity") == "high"])},
+        "js_intel": {"status": stage_state("js_intel", len(js_findings)), "results": len(js_findings), "high": len([j for j in js_findings if j.get("severity") == "high" and j.get("probable_vulnerability")])},
         "ffuf": {"status": "running" if scan.stage == "ffuf" and scan.status in {"running", "stopping"} else "partial" if ffuf_errors and ffuf_success else "failed" if ffuf_errors else "complete" if ffuf_success or dirs else "not_started", "results": len(dirs), "successful_hosts": ffuf_summary.get("successful_hosts", len(ffuf_success)), "failed_hosts": ffuf_summary.get("failed_hosts", len(ffuf_errors)), "total": ffuf_summary.get("total_hosts", len(http))},
         "nuclei": {"status": stage_state("nuclei", len(nuclei_findings)), "results": len(nuclei_findings), "high": len([n for n in nuclei_findings if n.get("severity") == "high"]), "critical": len([n for n in nuclei_findings if n.get("severity") == "critical"])},
         "parameters": {"status": stage_state("parameters", len(parameters)), "results": len(parameters), "suspicious": len([p for p in parameters if p.get("suspicious")]), "katana_input_urls": parameter_summary.get("katana_input_urls"), "lines": parameter_summary.get("lines"), "parse_errors": parameter_summary.get("parse_errors", 0), "raw_compacted": (parameter_summary.get("katana_raw") or {}).get("compacted")},
         "arjun": {"status": stage_state("arjun", len(arjun)), "results": len(arjun), "suspicious": len([p for p in arjun if p.get("suspicious")])},
         "screenshots": {"status": stage_state("screenshots", len(screenshots)), "results": len(screenshots), "input_urls": screenshot_summary.get("input_urls"), "saved": screenshot_summary.get("saved", len(screenshots)), "failed": screenshot_summary.get("failed")},
     }
+
+def _group_observations(rows: list[dict], key_fn) -> list[dict]:
+    grouped: dict[tuple | str, dict] = {}
+    for row in rows:
+        key = key_fn(row)
+        variants = list(row.get("variants") or [])
+        if not variants:
+            variants = [{
+                "url": row.get("url") or row.get("source_url"),
+                "status_code": row.get("status_code"),
+                "source": row.get("source"),
+                "sample_value": row.get("sample_value"),
+            }]
+        count = max(int(row.get("observation_count") or 1), len(variants), 1)
+        if key not in grouped:
+            item = dict(row)
+            item["variants"] = variants
+            item["observation_count"] = count
+            item["equivalent_ids"] = [row["id"]]
+            grouped[key] = item
+            continue
+        item = grouped[key]
+        item["observation_count"] += count
+        item["equivalent_ids"].append(row["id"])
+        existing_variants = item["variants"]
+        for variant in variants:
+            if variant not in existing_variants:
+                existing_variants.append(variant)
+        item["noise_score"] = max(int(item.get("noise_score") or 0), min(100, 5 + item["observation_count"]))
+        reasons = list(item.get("noise_reasons") or [])
+        duplicate_reason = f"{item['observation_count']} equivalent observations"
+        reasons = [reason for reason in reasons if "equivalent observations" not in reason]
+        reasons.append(duplicate_reason)
+        item["noise_reasons"] = reasons
+    return list(grouped.values())
+
 
 @app.get("/api/targets/{target_id}/results")
 def results(target_id: int, scan_id: int | None = None, db: Session = Depends(get_db)):
@@ -582,12 +620,38 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
         subdomain_query = subdomain_query.filter(or_(models.Subdomain.scan_id == scan.id, models.Subdomain.first_seen_scan_id == scan.id))
     subdomains = [rowdict(r, ["id", "name", "sources", "depths", "interesting", "note"]) for r in subdomain_query.all()]
     ports = [rowdict(r, ["id", "host", "ip", "port", "protocol", "source"]) for r in db.query(models.PortResult).filter_by(scan_id=data_scan_id("naabu")).all()]
-    http = [rowdict(r, ["id", "url", "status_code", "title", "tech", "fingerprints", "ports", "response_size", "server", "redirect_chain", "ip", "headers_sent", "response_headers", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=data_scan_id("httpx")).all()]
-    dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "confidence", "filtered_reason", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=data_scan_id("ffuf")).all()]
-    parameter_rows = [rowdict(r, ["id", "source_url", "base_url", "param", "sample_value", "method", "source", "suspicious", "reason", "interesting", "note"]) for r in db.query(models.ParameterResult).filter_by(scan_id=data_scan_id("parameters")).all()]
+    raw_http = [rowdict(r, ["id", "url", "asset_key", "variants", "observation_count", "status_code", "title", "tech", "fingerprints", "ports", "response_size", "server", "redirect_chain", "redirect_hops", "final_url", "certificate_fingerprint", "fingerprint_id", "noise_score", "noise_reasons", "novelty_score", "novelty_reasons", "ip", "headers_sent", "response_headers", "interesting", "note"]) for r in db.query(models.HttpxResult).filter_by(scan_id=data_scan_id("httpx")).all()]
+    raw_dirs = [rowdict(r, ["id", "base_url", "url", "path", "normalized_path", "method", "status_code", "title", "size", "words", "lines", "content_type", "redirect_location", "duration_ms", "body_hash", "fingerprint_id", "confidence", "filtered_reason", "variants", "observation_count", "noise_score", "noise_reasons", "novelty_score", "novelty_reasons", "open_directory", "headers_sent", "interesting", "note"]) for r in db.query(models.DirbResult).filter_by(scan_id=data_scan_id("ffuf")).all()]
+    raw_parameter_rows = [rowdict(r, ["id", "source_url", "base_url", "asset_key", "normalized_path", "param", "sample_value", "method", "source", "suspicious", "reason", "variants", "observation_count", "noise_score", "noise_reasons", "novelty_score", "novelty_reasons", "interesting", "note"]) for r in db.query(models.ParameterResult).filter_by(scan_id=data_scan_id("parameters")).all()]
+    http = _group_observations(raw_http, lambda row: row.get("asset_key") or canonical_asset_key(row.get("url")))
+    for row in http:
+        row["asset_key"] = row.get("asset_key") or canonical_asset_key(row.get("url"))
+        hops = row.get("redirect_hops") or []
+        if not hops and row.get("redirect_chain"):
+            try:
+                hops = json.loads(row["redirect_chain"])
+            except (TypeError, json.JSONDecodeError):
+                hops = [{"url": row["redirect_chain"], "status_code": None}]
+        row["redirect"] = {"origin": row.get("url"), "hops": hops, "final": row.get("final_url") or (hops[-1].get("url") if hops else row.get("url"))}
+    dirs = _group_observations(raw_dirs, lambda row: (
+        canonical_asset_key(row.get("base_url") or row.get("url")),
+        row.get("normalized_path") or normalize_path_pattern(row.get("url")),
+        str(row.get("method") or "GET").upper(),
+    ))
+    parameter_rows = _group_observations(raw_parameter_rows, lambda row: (
+        row.get("asset_key") or canonical_asset_key(row.get("source_url")),
+        row.get("normalized_path") or normalize_path_pattern(row.get("source_url")),
+        str(row.get("method") or "GET").upper(),
+        row.get("param"),
+    ))
     parameters = [r for r in parameter_rows if not str(r.get("source") or "").startswith("arjun-")]
     arjun = [r for r in parameter_rows if str(r.get("source") or "").startswith("arjun-")]
-    js_findings = [rowdict(r, ["id", "page_url", "source_url", "file_path", "finding_type", "severity", "indicator", "evidence", "line", "column", "confidence", "tags", "interesting", "note"]) for r in db.query(models.JsFinding).filter_by(scan_id=data_scan_id("js_intel")).all()]
+    raw_js_findings = [rowdict(r, ["id", "page_url", "source_url", "file_path", "content_hash", "finding_type", "severity", "indicator", "normalized_indicator", "evidence", "line", "column", "confidence", "classification", "probable_vulnerability", "tags", "variants", "observation_count", "noise_score", "noise_reasons", "novelty_score", "novelty_reasons", "interesting", "note"]) for r in db.query(models.JsFinding).filter_by(scan_id=data_scan_id("js_intel")).all()]
+    js_findings = _group_observations(raw_js_findings, lambda row: (
+        row.get("content_hash") or hashlib.sha256(str(row.get("source_url") or "").encode()).hexdigest(),
+        row.get("finding_type"),
+        row.get("normalized_indicator") or normalize_indicator(row.get("indicator")),
+    ))
     for finding in js_findings:
         finding["finder"] = _js_finder(finding)
     nuclei_findings = [rowdict(r, ["id", "template_id", "template_name", "severity", "matched_at", "host", "ip", "matcher_name", "type", "description", "extracted_results", "references", "tags", "raw", "interesting", "note"]) for r in db.query(models.NucleiFinding).filter_by(scan_id=data_scan_id("nuclei")).all()]
@@ -595,11 +659,35 @@ def results(target_id: int, scan_id: int | None = None, db: Session = Depends(ge
     raw_scan_ids = [scan.id, base_scan_id] if focused_stage and base_scan_id != scan.id else [scan.id]
     raw_rows = db.query(models.RawOutput).filter(models.RawOutput.scan_id.in_(raw_scan_ids)).all()
     raw = [{"id": r.id, "stage": r.stage, "tool": r.tool, "path": r.path} for r in raw_rows]
+    unique_hostnames = {
+        (urlparse(row.get("asset_key") or row.get("url") or "").hostname or "").lower()
+        for row in http
+        if urlparse(row.get("asset_key") or row.get("url") or "").hostname
+    }
+    endpoint_keys = {
+        (canonical_asset_key(row.get("base_url") or row.get("url")), row.get("normalized_path") or normalize_path_pattern(row.get("url")), row.get("method") or "GET")
+        for row in dirs
+    } | {
+        (row.get("asset_key") or canonical_asset_key(row.get("source_url")), row.get("normalized_path") or normalize_path_pattern(row.get("source_url")), row.get("method") or "GET")
+        for row in parameter_rows
+    }
+    summary = {
+        "unique_hosts": len(unique_hostnames),
+        "unique_endpoints": len(endpoint_keys),
+        "unique_parameters": len(parameter_rows),
+        "raw_counts": {
+            "http": sum(max(int(row.get("observation_count") or 1), 1) for row in raw_http),
+            "dirs": sum(max(int(row.get("observation_count") or 1), 1) for row in raw_dirs),
+            "parameters": sum(max(int(row.get("observation_count") or 1), 1) for row in raw_parameter_rows),
+            "js_findings": sum(max(int(row.get("observation_count") or 1), 1) for row in raw_js_findings),
+        },
+    }
     return {
         "target": {"id": target.id, "domain": target.domain},
         "scans": [{"id": s.id, "status": s.status, "stage": s.stage, "progress": s.progress, "created_at": s.created_at} for s in scans_q.all()],
         "active_scan": {"id": scan.id, "status": scan.status, "stage": scan.stage, "progress": scan.progress, "error": scan.error},
         "stage_statuses": stage_statuses(db, scan, subdomains, http, dirs, parameters, arjun, js_findings, nuclei_findings, screenshots, raw_rows),
+        "summary": summary,
         "subdomains": subdomains,
         "ports": ports,
         "http": http,

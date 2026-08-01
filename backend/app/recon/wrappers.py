@@ -2,7 +2,9 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
+
+from app.recon.normalization import canonical_asset_key, canonicalize_url, normalize_path_pattern
 
 
 def _headers(user_agent: str | None = None, headers: dict[str, str] | None = None) -> list[str]:
@@ -19,7 +21,7 @@ def _headers(user_agent: str | None = None, headers: dict[str, str] | None = Non
 def build_httpx_command(input_file: Path, output_file: Path, user_agent: str | None = None, headers: dict[str, str] | None = None, proxy: str | None = None) -> list[str]:
     cmd = [
         "httpx", "-l", str(input_file), "-json", "-silent", "-status-code", "-title",
-        "-tech-detect", "-content-length", "-server", "-ip", "-location",
+        "-tech-detect", "-content-length", "-server", "-ip", "-location", "-tls-grab",
     ]
     cmd.extend(_headers(user_agent, headers))
     if proxy:
@@ -34,15 +36,48 @@ def parse_httpx_jsonl(text: str) -> list[dict]:
         if not line.strip():
             continue
         item = json.loads(line)
+        observed_url = item.get("url") or item.get("input")
+        canonical_url = canonicalize_url(observed_url)
+        raw_chain = item.get("chain") or item.get("redirect-chain") or item.get("redirect_chain") or []
+        if isinstance(raw_chain, str):
+            raw_chain = [part.strip() for part in re.split(r"\s*(?:->|,)\s*", raw_chain) if part.strip()]
+        redirect_hops: list[dict] = []
+        cursor = canonical_url
+        for hop in raw_chain if isinstance(raw_chain, list) else []:
+            if isinstance(hop, dict):
+                hop_url = hop.get("url") or hop.get("location")
+                hop_status = hop.get("status_code") or hop.get("status")
+            else:
+                hop_url, hop_status = str(hop), None
+            if not hop_url:
+                continue
+            cursor = canonicalize_url(urljoin(cursor, str(hop_url)))
+            redirect_hops.append({"url": cursor, "status_code": hop_status})
+        location = item.get("location")
+        if location and not redirect_hops:
+            cursor = canonicalize_url(urljoin(canonical_url, str(location)))
+            redirect_hops.append({"url": cursor, "status_code": None})
+        final_url = canonicalize_url(item.get("final_url") or item.get("final-url") or (redirect_hops[-1]["url"] if redirect_hops else canonical_url))
+        tls = item.get("tls") or {}
+        fingerprint_hash = tls.get("fingerprint_hash") or tls.get("fingerprint-hash") or {}
+        certificate_fingerprint = (
+            fingerprint_hash.get("sha256") if isinstance(fingerprint_hash, dict) else None
+        ) or tls.get("sha256") or item.get("certificate_fingerprint")
         rows.append({
-            "url": item.get("url") or item.get("input"),
+            "url": canonical_url,
+            "asset_key": canonical_asset_key(canonical_url),
+            "variants": [{"url": str(observed_url), "status_code": item.get("status_code")}],
+            "observation_count": 1,
             "status_code": item.get("status_code"),
             "title": item.get("title"),
             "tech": item.get("tech") or item.get("technologies") or [],
             "response_size": item.get("content_length") or item.get("content-length") or item.get("body_length"),
             "server": item.get("webserver") or item.get("server"),
             "ip": item.get("host") or item.get("ip"),
-            "redirect_chain": item.get("location") or item.get("redirect-chain") or item.get("final_url"),
+            "redirect_chain": json.dumps(redirect_hops),
+            "redirect_hops": redirect_hops,
+            "final_url": final_url,
+            "certificate_fingerprint": certificate_fingerprint,
             "response_headers": item.get("header") or item.get("headers") or {},
         })
     return rows
@@ -205,6 +240,7 @@ def parse_ffuf_json(text: str) -> list[dict]:
             "lines": lines,
             "content_type": item.get("content-type") or item.get("content_type") or item.get("contenttype"),
             "redirect_location": item.get("redirectlocation") or item.get("redirect_location") or item.get("location"),
+            "title": title or None,
             "duration_ms": duration_ms,
             "body_hash": item.get("body_hash") or item.get("hash") or hashlib.sha256(signature).hexdigest(),
             "confidence": "unverified",
@@ -503,14 +539,18 @@ def extract_parameters_from_urls(text: str, source: str = "url") -> list[dict]:
             for name, value, method in pairs:
                 if not name:
                     continue
-                key = (str(candidate), name, method)
+                asset_key = canonical_asset_key(str(candidate))
+                normalized_path = normalize_path_pattern(parsed.path or "/")
+                key = (asset_key, normalized_path, name, method)
                 if key in seen:
                     continue
                 seen.add(key)
                 suspicious, reason = classify_parameter_name(name)
                 rows.append({
-                    "source_url": str(candidate),
-                    "base_url": base_url,
+                    "source_url": canonicalize_url(str(candidate)),
+                    "base_url": canonicalize_url(base_url),
+                    "asset_key": asset_key,
+                    "normalized_path": normalized_path,
                     "param": name,
                     "sample_value": value[:512] if value is not None else None,
                     "method": method,
@@ -549,14 +589,18 @@ def parse_arjun_json(text: str, source: str = "arjun") -> list[dict]:
             name = str(param).strip()
             if not name:
                 continue
-            key = (str(url), name, method)
+            asset_key = canonical_asset_key(str(url))
+            normalized_path = normalize_path_pattern(parsed.path or "/")
+            key = (asset_key, normalized_path, name, method)
             if key in seen:
                 continue
             seen.add(key)
             suspicious, reason = classify_parameter_name(name)
             rows.append({
-                "source_url": str(url),
-                "base_url": base_url,
+                "source_url": canonicalize_url(str(url)),
+                "base_url": canonicalize_url(base_url),
+                "asset_key": asset_key,
+                "normalized_path": normalized_path,
                 "param": name,
                 "sample_value": None,
                 "method": method,

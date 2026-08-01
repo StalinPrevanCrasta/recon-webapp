@@ -76,13 +76,19 @@ def test_parse_httpx_jsonl_extracts_required_fields():
     rows = parse_httpx_jsonl('{"url":"https://a.example","status_code":200,"title":"Home","tech":["nginx"],"content_length":123,"webserver":"nginx","host":"1.2.3.4","location":"/login"}\n')
     assert rows == [{
         "url": "https://a.example",
+        "asset_key": "https://a.example",
+        "variants": [{"url": "https://a.example", "status_code": 200}],
+        "observation_count": 1,
         "status_code": 200,
         "title": "Home",
         "tech": ["nginx"],
         "response_size": 123,
         "server": "nginx",
         "ip": "1.2.3.4",
-        "redirect_chain": "/login",
+        "redirect_chain": '[{"url": "https://a.example/login", "status_code": null}]',
+        "redirect_hops": [{"url": "https://a.example/login", "status_code": None}],
+        "final_url": "https://a.example/login",
+        "certificate_fingerprint": None,
         "response_headers": {},
     }]
 
@@ -151,7 +157,9 @@ def test_parameter_discovery_commands_and_parser(tmp_path):
     rows = extract_parameters_from_urls("https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example\n", "gau")
     assert rows == [{
         "source_url": "https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example",
-        "base_url": "https://a.example/search",
+            "base_url": "https://a.example/search",
+            "asset_key": "https://a.example",
+            "normalized_path": "/search",
         "param": "q",
         "sample_value": "test",
         "method": "GET",
@@ -160,7 +168,9 @@ def test_parameter_discovery_commands_and_parser(tmp_path):
         "reason": None,
     }, {
         "source_url": "https://a.example/search?q=test&redirect=https%3A%2F%2Fevil.example",
-        "base_url": "https://a.example/search",
+            "base_url": "https://a.example/search",
+            "asset_key": "https://a.example",
+            "normalized_path": "/search",
         "param": "redirect",
         "sample_value": "https://evil.example",
         "method": "GET",

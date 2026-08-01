@@ -226,6 +226,16 @@ function countBy(rows, getter) {
   return [...map.entries()].sort((a, b) => b[1] - a[1]);
 }
 
+function isApiRow(row = {}) {
+  if ((row.tags || []).includes('api')) return true;
+  const value = String(row.url || row.source_url || row.matched_at || row.name || '');
+  let path = value;
+  try { path = new URL(value).pathname; } catch {}
+  if (/\.(?:pdf|css|js|map|png|jpe?g|gif|svg|woff2?|ttf|docx?|xlsx?|pptx?|zip)(?:$|[?#])/i.test(path)) return false;
+  if (/\/(?:asset|assets|blog|careers|events|investors|legal|news|partner|press|privacy|solutions|support)(?:\/|$)/i.test(path) && !/\/(?:api|graphql|rest|openapi|swagger|wp-json)(?:\/|$)/i.test(path)) return false;
+  return /\/(?:api|graphql|rest|openapi|swagger|wp-json|v\d+)(?:\/|$)/i.test(path);
+}
+
 function tagsFor(row) {
   const haystack = `${row.url || row.source_url || row.matched_at || row.name || ''} ${row.title || row.template_name || row.description || ''} ${(row.tech || []).join(' ')} ${(row.tags || []).join(' ')}`.toLowerCase();
   const tags = [];
@@ -240,13 +250,17 @@ function tagsFor(row) {
   if (row.finding_type) tags.push(row.finding_type);
   if (row.template_id) tags.push('Nuclei');
   if (row.severity === 'critical') tags.push('Critical');
-  if (row.severity === 'high') tags.push('High Signal');
+  if (row.severity === 'high' && row.probable_vulnerability) tags.push('High Signal');
+  if (row.severity === 'high' && row.classification === 'interesting_lead') tags.push('Review');
   if (row.severity === 'medium') tags.push('Review');
+  if (row.classification === 'interesting_lead') tags.push('Lead');
+  if (row.probable_vulnerability) tags.push('Probable');
+  if ((row.observation_count || 1) > 1) tags.push(`${row.observation_count}× grouped`);
   if ((row.tags || []).includes('source-sink')) tags.push('Source → Sink');
   if ((row.tags || []).includes('secret')) tags.push('Secret');
   if (/admin|manage|console|dashboard/.test(haystack)) tags.push('Admin');
   if (/login|signin|sso|auth/.test(haystack)) tags.push('Login');
-  if (/api|graphql|swagger|openapi/.test(haystack)) tags.push('API');
+  if (isApiRow(row)) tags.push('API');
   if (/jenkins|kibana|grafana/.test(haystack)) tags.push('Dashboard');
   return tags;
 }
@@ -299,7 +313,7 @@ function SummaryCards({result}) {
   const dirs = result?.dirs || [];
   const jsFindings = result?.js_findings || [];
   const nucleiFindings = result?.nuclei_findings || [];
-  const jsHigh = jsFindings.filter(j => j.severity === 'high').length;
+  const jsHigh = jsFindings.filter(j => j.severity === 'high' && j.probable_vulnerability).length;
   const nucleiCritical = nucleiFindings.filter(n => n.severity === 'critical').length;
   const nucleiHigh = nucleiFindings.filter(n => n.severity === 'high').length;
   const confirmedDirs = dirs.filter(d => d.confidence === 'confirmed').length;
@@ -311,12 +325,15 @@ function SummaryCards({result}) {
   const ports = new Set(http.flatMap(h => h.ports || [])).size;
   const uniqueTech = new Set(http.flatMap(h => compactTech(h.tech))).size;
   const cdns = http.filter(h => /cloudflare|cloudfront|akamai|fastly/i.test((h.tech || []).join(' '))).length;
+  const summary = result?.summary || {};
+  const rawCounts = summary.raw_counts || {};
   return <>
     <div className="cards compact-cards">
       <div className="card"><span className="card-label">DNS</span><b>{subdomains}</b><span>Subdomains</span><small>{newSubdomains} new · {cachedSubdomains} cached</small></div>
-      <div className="card"><span className="card-label">HTTP</span><b>{live}</b><span>Live hosts</span></div>
+      <div className="card"><span className="card-label">HOSTS</span><b>{summary.unique_hosts ?? live}</b><span>Unique hosts</span><small>{rawCounts.http ?? http.length} raw HTTP observations</small></div>
       <div className="card"><span className="card-label">VISUAL</span><b>{screenshots}</b><span>Screenshots</span></div>
-      <div className="card"><span className="card-label">PATHS</span><b>{confirmedDirs}</b><span>Content paths</span><small>{possibleDirs} possible · {filteredDirs} filtered</small></div>
+      <div className="card"><span className="card-label">ENDPOINTS</span><b>{summary.unique_endpoints ?? dirs.length}</b><span>Unique endpoints</span><small>{rawCounts.dirs ?? dirs.length} raw paths · {confirmedDirs} confirmed</small></div>
+      <div className="card"><span className="card-label">PARAMS</span><b>{summary.unique_parameters ?? (result?.parameters || []).length}</b><span>Unique parameters</span><small>{rawCounts.parameters ?? (result?.parameters || []).length} raw observations</small></div>
       <div className="card hot"><span className="card-label">MARKED</span><b>{interesting}</b><span>Marked</span></div>
       <div className="card warn"><span className="card-label">RISK</span><b>{takeoverHints}</b><span>Takeover / JS hints</span><small>{jsHigh} high JS</small></div>
       <div className="card hot"><span className="card-label">NUCLEI</span><b>{nucleiFindings.length}</b><span>Vulnerabilities</span><small>{nucleiCritical} critical · {nucleiHigh} high</small></div>
@@ -338,7 +355,7 @@ function ProgressPanel({scan, result}) {
   const parameters = result?.parameters || [];
   const jsFindings = result?.js_findings || [];
   const nucleiFindings = result?.nuclei_findings || [];
-  const highJsFindings = jsFindings.filter(j => j.severity === 'high').length;
+  const highJsFindings = jsFindings.filter(j => j.severity === 'high' && j.probable_vulnerability).length;
   const highNuclei = nucleiFindings.filter(n => ['high', 'critical'].includes(n.severity)).length;
   const confirmed = dirs.filter(d => d.confidence === 'confirmed').length;
   const possible = dirs.filter(d => d.confidence === 'possible').length;
@@ -396,7 +413,7 @@ function ProgressPanel({scan, result}) {
 function Header({domain, setDomain, run, stopScan, result, targets, loadTarget, runDisabled, runError, openTargets, openSettings}) {
   const scan = result?.active_scan;
   const target = result?.target?.domain || 'No target selected';
-  const counts = `${result?.subdomains?.length || 0} subdomains | ${(result?.http || []).length} live results | ${result?.dirs?.length || 0} content paths | ${result?.nuclei_findings?.length || 0} vulns | ${result?.parameters?.length || 0} params`;
+  const counts = `${result?.subdomains?.length || 0} subdomains | ${result?.summary?.unique_hosts ?? (result?.http || []).length} unique hosts | ${result?.summary?.unique_endpoints ?? (result?.dirs || []).length} endpoints | ${result?.summary?.unique_parameters ?? (result?.parameters || []).length} params | ${result?.nuclei_findings?.length || 0} vulns`;
   const activeScan = ['queued', 'running', 'stopping'].includes(scan?.status);
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
@@ -444,7 +461,7 @@ function applyFilters(rows, filters) {
       (!filters.chips.includes('Interesting Status') || INTERESTING_STATUS_CODES.has(Number(row.status_code))) &&
       (!filters.chips.includes('Suspicious Param') || row.suspicious) &&
       (!filters.chips.includes('Alive') || (row.status_code && row.status_code < 500)) &&
-      (!filters.chips.includes('APIs') || /api/i.test(blob)) &&
+      (!filters.chips.includes('APIs') || isApiRow(row)) &&
       (!filters.chips.includes('Login') || /login|signin|sso|auth/i.test(blob)) &&
       (!filters.chips.includes('Admin') || /admin|manage|console|dashboard/i.test(blob)) &&
       (!filters.chips.includes('GraphQL') || /graphql/i.test(blob)) &&
@@ -457,6 +474,7 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
   const [filters, setFilters] = useState({q: '', host: '', status: '', title: '', tech: '', ip: '', source: '', tags: '', confidence: '', chips: []});
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [expanded, setExpanded] = useState(() => new Set());
   const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -470,18 +488,20 @@ function AssetTable({rows, kind, selectRow, selectedIds, toggleSelected, markInt
     <div className="table-wrap"><table className={`asset-table ${kind}`}><colgroup><col className="col-select"/><col className="col-host"/><col className="col-status"/><col className="col-title"/><col className="col-ip"/><col className="col-tech"/><col className="col-source"/><col className="col-tags"/><col className="col-confidence"/><col className="col-actions"/></colgroup><thead><tr><th></th><th>Host</th><th>Status</th><th>Title</th><th>IP</th><th>Tech</th><th>Source</th><th>Tags</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>{visible.map(row => {
       const value = row.url || row.source_url || row.matched_at || row.name;
       const tags = tagsFor(row);
-      return <tr key={`${kind}-${row.id}`} onClick={() => selectRow({...row, kind})} className={row.is_new ? 'new' : ''}>
+      const grouped = (row.observation_count || 1) > 1;
+      const isExpanded = expanded.has(row.id);
+      return <React.Fragment key={`${kind}-${row.id}`}><tr onClick={() => selectRow({...row, kind})} className={row.is_new ? 'new' : ''}>
         <td onClick={e => e.stopPropagation()}><input type="checkbox" checked={selectedIds.has(row.id)} onChange={e => toggleSelected(row.id, e.target.checked)}/></td>
-        <td title={value}><div className="host-cell">{faviconFor(value)}<div><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div></div></div></td>
+        <td title={value}><div className="host-cell">{faviconFor(value)}<div><b>{hostFromUrl(value)}</b><div className="subtext">{value}</div>{grouped && <button className="equivalent-toggle" onClick={e => { e.stopPropagation(); setExpanded(current => { const next = new Set(current); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; }); }}>{isExpanded ? 'Hide' : 'Show'} {row.observation_count} equivalent</button>}</div></div></td>
         <td>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : <span className="muted">—</span>}</td>
         <td title={[row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || '', row.reason || row.evidence || row.description || ''].filter(Boolean).join('\n')}><div className="cell-main">{row.title || row.template_name || row.path || row.param || row.indicator || row.template_id || <span className="muted">—</span>}</div><div className="subtext">{row.reason || row.evidence || row.description || ''}</div></td>
         <td>{row.ip || (row.line ? `Line ${row.line}` : <span className="muted">—</span>)}<div className="subtext">{(row.ports || []).length ? `Ports ${(row.ports || []).join(', ')}` : row.column ? `Column ${row.column}` : ''}</div></td>
         <td>{row.finding_type ? <TechBadges tech={[jsFinder(row), row.finding_type, ...(row.tags || [])]} max={8} /> : row.template_id ? <TechBadges tech={[row.type || 'nuclei', ...(row.tags || [])]} /> : <TechBadges tech={[...(row.fingerprints || []), ...(row.tech || [])]} />}</td>
         <td title={jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || ''}><div className="cell-main">{jsFinder(row) || (row.sources || []).join(', ') || row.source || row.finding_type || row.template_id || row.base_url || <span className="muted">—</span>}</div>{row.finding_type && <div className="subtext">{row.finding_type}</div>}</td>
         <td>{tags.length ? tags.map(t => <Badge key={t} tone={t === 'Marked' ? 'hot' : t === 'Filtered' ? 'client' : t === 'Possible' ? 'warn' : t === 'Confirmed' ? 'ok' : 'muted'}>{t}</Badge>) : <span className="muted">—</span>}</td>
-        <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
+        <td>{row.severity ? <Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge> : row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : <span className="muted">—</span>}<div className="score-row"><Badge tone={(row.noise_score || 0) >= 50 ? 'client' : 'muted'}>Noise {row.noise_score || 0}</Badge><Badge tone={(row.novelty_score || 0) >= 50 ? 'ok' : 'muted'}>Novel {row.novelty_score || 0}</Badge></div><div className="subtext">{row.confidence && row.severity ? row.confidence : ''}{row.size ? `${row.size} B` : ''}{row.words ? ` · ${row.words}w` : ''}</div></td>
         <td className="actions" onClick={e => e.stopPropagation()}><button onClick={() => window.open(openUrl(value), '_blank', 'noopener,noreferrer')}>Open</button><button onClick={() => copy(value)}>Copy</button><button title="Send to Playground" onClick={() => sendToPlayground({...row, kind})}>Playground</button><button onClick={() => markInteresting(kind, row)}>Mark</button><button title="Screenshot">Shot</button><button title="Run Nuclei on this row" disabled={!runNucleiOnRows || !nucleiUrlForRow(row)} onClick={() => runNucleiOnRows([row])}>Nuclei</button></td>
-      </tr>;
+      </tr>{isExpanded && <tr className="equivalent-row"><td></td><td colSpan="9"><b>Equivalent observations</b><div className="equivalent-list">{(row.variants || []).map((variant, index) => <span key={`${variant.url || variant.source_url || index}-${index}`}>{variant.url || variant.source_url || JSON.stringify(variant)}</span>)}</div>{row.observation_count > (row.variants || []).length && <small>Showing {(row.variants || []).length} of {row.observation_count} observations.</small>}</td></tr>}</React.Fragment>;
     })}</tbody></table></div>
   </>;
 }
@@ -537,7 +557,7 @@ function DetailsPanel({row, result, close, markInteresting}) {
   const value = row.url || row.source_url || row.matched_at || row.name || row.image_path;
   const cdn = compactTech(row.tech).find(t => /cloudfront|cloudflare|akamai|fastly/i.test(t)) || '—';
   const asn = /amazon|aws|cloudfront|s3/i.test((row.tech || []).join(' ')) ? 'Amazon' : /cloudflare/i.test((row.tech || []).join(' ')) ? 'Cloudflare' : '—';
-  return <aside className="details"><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Nuclei Finding</span>{row.template_id ? <><Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : 'warn'}>{row.severity}</Badge><Badge>{row.template_id}</Badge></> : '—'}</div><div className="detail-row"><span>Template Name</span>{row.template_name || '—'}</div><div className="detail-row"><span>Matcher / Type</span>{[row.matcher_name, row.type].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>JS Finder</span>{row.finding_type ? <Badge tone={jsFinder(row) === 'TruffleHog' ? 'server' : 'client'}>{jsFinder(row)}</Badge> : '—'}</div><div className="detail-row"><span>JS Finding</span>{row.finding_type ? <><Badge tone={row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge><Badge>{row.finding_type}</Badge></> : '—'}</div><div className="detail-row"><span>Indicator</span>{row.indicator || '—'}</div><div className="detail-row"><span>Location</span>{row.line ? `Line ${row.line}${row.column ? `, column ${row.column}` : ''}` : '—'}</div><div className="detail-row"><span>Page URL</span>{row.page_url || '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || row.matched_at || '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div>{row.description && <div className="detail-block"><span>Description</span><pre>{row.description}</pre></div>}{(row.extracted_results || []).length > 0 && <div className="detail-block"><span>Extracted Results</span><pre>{(row.extracted_results || []).join('\n')}</pre></div>}{(row.references || []).length > 0 && <div className="detail-block"><span>References</span><pre>{(row.references || []).join('\n')}</pre></div>}{row.evidence && <div className="detail-block"><span>Evidence</span><pre>{row.evidence}</pre></div>}{row.file_path && <div className="detail-block"><span>Downloaded bundle</span><pre>{row.file_path}</pre></div>}<div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div>{row.raw && <div className="detail-block"><span>Nuclei Raw</span><pre>{JSON.stringify(row.raw || {}, null, 2)}</pre></div>}<div className="detail-actions"><button onClick={() => window.open(openUrl(value), '_blank', 'noopener,noreferrer')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button onClick={() => sendToPlayground(row)}>Send to Playground</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
+  return <aside className="details"><div className="details-host">{faviconFor(value)}<h3>{hostFromUrl(value)}</h3></div><p className="subtext">{value}</p><div className="detail-row"><span>Status</span>{row.status_code ? <Badge tone={statusClass(row.status_code)}>{row.status_code}</Badge> : '—'}</div><div className="detail-row"><span>Nuclei Finding</span>{row.template_id ? <><Badge tone={row.severity === 'critical' || row.severity === 'high' ? 'server' : 'warn'}>{row.severity}</Badge><Badge>{row.template_id}</Badge></> : '—'}</div><div className="detail-row"><span>Template Name</span>{row.template_name || '—'}</div><div className="detail-row"><span>Matcher / Type</span>{[row.matcher_name, row.type].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>JS Finder</span>{row.finding_type ? <Badge tone={jsFinder(row) === 'TruffleHog' ? 'server' : 'client'}>{jsFinder(row)}</Badge> : '—'}</div><div className="detail-row"><span>Classification</span>{row.finding_type ? <Badge tone={row.probable_vulnerability ? 'server' : 'warn'}>{row.probable_vulnerability ? 'Probable vulnerability' : 'Interesting lead'}</Badge> : '—'}</div><div className="detail-row"><span>JS Finding</span>{row.finding_type ? <><Badge tone={row.severity === 'high' ? 'server' : row.severity === 'medium' ? 'warn' : 'muted'}>{row.severity}</Badge><Badge>{row.finding_type}</Badge></> : '—'}</div><div className="detail-row"><span>Indicator</span>{row.indicator || '—'}</div><div className="detail-row"><span>Location</span>{row.line ? `Line ${row.line}${row.column ? `, column ${row.column}` : ''}` : '—'}</div><div className="detail-row"><span>Page URL</span>{row.page_url || '—'}</div><div className="detail-row"><span>Parameter</span>{row.param ? <><Badge tone={row.suspicious ? 'warn' : 'muted'}>{row.param}</Badge>{row.method && <Badge>{row.method}</Badge>}</> : '—'}</div><div className="detail-row"><span>Normalized Identity</span>{row.asset_key || row.normalized_path ? `${row.asset_key || ''}${row.normalized_path || ''}` : '—'}</div><div className="detail-row"><span>Param Reason</span>{row.reason || '—'}</div><div className="detail-row"><span>Sample Value</span>{row.sample_value || '—'}</div><div className="detail-row"><span>IP</span>{row.ip || '—'}</div><div className="detail-row"><span>Ports</span>{(row.ports || []).length ? (row.ports || []).join(', ') : '—'}</div><div className="detail-row"><span>ASN</span>{asn}</div><div className="detail-row"><span>CDN</span>{cdn}</div><div className="detail-row"><span>Title / Path</span>{row.title || row.path || row.base_url || row.matched_at || '—'}</div><div className="detail-row"><span>Redirect Chain</span>{row.redirect ? `${row.redirect.origin} → ${(row.redirect.hops || []).map(h => h.url).join(' → ') || row.redirect.final}` : '—'}</div><div className="detail-row"><span>Confidence</span>{row.confidence ? <Badge tone={row.confidence === 'confirmed' ? 'ok' : row.confidence === 'possible' ? 'warn' : row.confidence === 'filtered' ? 'client' : 'muted'}>{row.confidence}</Badge> : '—'}</div><div className="detail-row"><span>Noise / Novelty</span><Badge tone={(row.noise_score || 0) >= 50 ? 'client' : 'muted'}>Noise {row.noise_score || 0}</Badge><Badge tone={(row.novelty_score || 0) >= 50 ? 'ok' : 'muted'}>Novelty {row.novelty_score || 0}</Badge></div><div className="detail-row"><span>Observations</span>{row.observation_count || 1}</div><div className="detail-row"><span>Response Fingerprint</span>{row.fingerprint_id || row.content_hash || '—'}</div><div className="detail-row"><span>Size / Words / Lines</span>{[row.size && `${row.size} B`, row.words && `${row.words} words`, row.lines && `${row.lines} lines`].filter(Boolean).join(' · ') || '—'}</div><div className="detail-row"><span>Filtered Reason</span>{row.filtered_reason || '—'}</div><div className="detail-row"><span>Fingerprints</span><TechBadges tech={row.fingerprints} max={8}/></div><div className="detail-row"><span>Technologies</span><TechBadges tech={row.tech} max={8}/></div><div className="detail-row"><span>Tags</span>{tagsFor(row).map(t => <Badge key={t}>{t}</Badge>)}</div>{row.description && <div className="detail-block"><span>Description</span><pre>{row.description}</pre></div>}{(row.extracted_results || []).length > 0 && <div className="detail-block"><span>Extracted Results</span><pre>{(row.extracted_results || []).join('\n')}</pre></div>}{(row.references || []).length > 0 && <div className="detail-block"><span>References</span><pre>{(row.references || []).join('\n')}</pre></div>}{row.evidence && <div className="detail-block"><span>Evidence</span><pre>{row.evidence}</pre></div>}{row.file_path && <div className="detail-block"><span>Downloaded bundle</span><pre>{row.file_path}</pre></div>}{(row.variants || []).length > 1 && <div className="detail-block"><span>Equivalent observations</span><pre>{JSON.stringify(row.variants, null, 2)}</pre></div>}<div className="detail-block"><span>Response headers</span><pre>{JSON.stringify(row.response_headers || {}, null, 2)}</pre></div><div className="detail-block"><span>Headers sent</span><pre>{JSON.stringify(row.headers_sent || {}, null, 2)}</pre></div>{row.raw && <div className="detail-block"><span>Nuclei Raw</span><pre>{JSON.stringify(row.raw || {}, null, 2)}</pre></div>}<div className="detail-actions"><button onClick={() => window.open(openUrl(value), '_blank', 'noopener,noreferrer')}>Open</button><button onClick={() => navigator.clipboard?.writeText(value)}>Copy URL</button><button onClick={() => sendToPlayground(row)}>Send to Playground</button><button>Screenshot</button><button>Whois</button><button>Run Nuclei</button><button>Crawl</button><button onClick={() => markInteresting(row.kind, row)}>Mark</button></div></aside>;
 }
 
 

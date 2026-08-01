@@ -568,7 +568,13 @@ def test_analyze_js_text_finds_endpoints_secrets_and_source_sink():
 
     assert ("endpoint", "/api/v1/users") in pairs
     assert ("secret", "Google API key") in pairs
-    assert any(row["finding_type"] == "source-sink" and row["severity"] == "high" for row in findings)
+    assert any(
+        row["finding_type"] == "source-sink"
+        and row["severity"] == "medium"
+        and row["classification"] == "interesting_lead"
+        and row["probable_vulnerability"] is False
+        for row in findings
+    )
 
 
 def test_parse_trufflehog_json_maps_files_to_js_findings():
@@ -586,6 +592,8 @@ def test_parse_trufflehog_json_maps_files_to_js_findings():
         "line": 12,
         "column": None,
         "confidence": "verified",
+        "classification": "probable_vulnerability",
+        "probable_vulnerability": True,
         "tags": ["secret", "trufflehog", "verified"],
     }]
 

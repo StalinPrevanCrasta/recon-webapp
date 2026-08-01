@@ -56,5 +56,12 @@ assert.match(src, /r\.url \|\| r\.source_url \|\| r\.name/, 'copy selected inclu
 assert.match(src, /Stop scan/, 'header includes stop scan action while a scan is active');
 assert.match(src, /\/scans\/\$\{scanId\}\/stop/, 'stop scan action calls the stop endpoint');
 assert.match(src, /\['queued', 'running', 'stopping'\]/, 'polling and disabled states include stopping scans');
+assert.match(src, /Unique hosts/, 'summary prioritizes unique hosts');
+assert.match(src, /Unique endpoints/, 'summary prioritizes unique endpoints');
+assert.match(src, /Unique parameters/, 'summary prioritizes unique parameters');
+assert.match(src, /equivalent-toggle/, 'grouped observations can be expanded');
+assert.match(src, /Interesting lead/, 'heuristic JavaScript results are labeled as leads');
+assert.match(src, /Noise \{row\.noise_score/, 'rows display noise scores');
+assert.match(src, /Novel \{row\.novelty_score/, 'rows display novelty scores');
 
 console.log('frontend log viewer static tests passed');
