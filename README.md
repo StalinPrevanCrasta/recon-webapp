@@ -159,6 +159,18 @@ See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the full operating guide. Sho
 4. Review tabs: Subdomains, Live Hosts, Directories, Screenshots, Raw Output.
 5. Export JSON/CSV from a target view.
 
+## Security Lab and payload campaigns
+
+The Playground includes an evidence-based XSS/SQLi payload campaign runner. Load a `.txt` list, place `{{PAYLOAD}}` in the request URL or body, configure the time gap and rate cap, and optionally provide one proxy URL per line for rotation. A payload is marked **found** only for strong evidence such as new verbatim reflection, a new database error signature, or a response delay over the configured baseline threshold; status and size changes alone remain anomalies.
+
+Open **Security Lab** from the dashboard or Playground for:
+
+- unified OpenAPI/Swagger, Postman, GraphQL introspection, mobile config, source-map, and JavaScript endpoint inventories;
+- documented-versus-observed endpoint comparison with undocumented operation priorities;
+- GraphQL operation, variable, object-ID, OAuth/PKCE, feature flag, environment, route-template, WebSocket, and DOM source-to-sink extraction;
+- Account A versus Account B and anonymous/user/privileged/member/administrator authorization matrices;
+- mass-assignment/read-only property comparison, two-session WebSocket replay, and file-upload/retrieval analysis.
+
 ## Verification commands
 
 ```bash

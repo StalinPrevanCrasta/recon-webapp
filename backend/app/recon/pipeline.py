@@ -32,6 +32,7 @@ from app.recon.wrappers import (
 )
 from app.recon.wordlists import resolve_ffuf_wordlist
 from app.settings_store import load_settings
+from app.security_intel import extract_js_intelligence, trace_dom_flows
 
 logger = logging.getLogger(__name__)
 
@@ -1019,6 +1020,32 @@ def analyze_js_text(text: str, source_url: str, page_url: str | None, target_dom
         severity = "medium" if api_like and re.search(r"/(?:admin|internal|private|oauth|sso|graphql)", endpoint, re.I) else "low"
         add("endpoint", severity, endpoint, match, ["endpoint", "api"] if api_like else ["endpoint", "route"], "pattern")
 
+    # Keep actionable JS configuration types separate from the generic endpoint
+    # stream so the UI can filter them without re-running bundle analysis.
+    intelligence = extract_js_intelligence(text, source_url)
+    typed_values = (
+        ("api-base-url", "low", intelligence.get("api_base_urls", []), ["api", "base-url"]),
+        ("feature-flag", "info", intelligence.get("feature_flags", []), ["feature-flag"]),
+        ("environment", "info", intelligence.get("environments", []), ["environment"]),
+        ("websocket-url", "low", intelligence.get("websocket_urls", []), ["websocket", "endpoint"]),
+    )
+    for kind, severity, values, tags in typed_values:
+        for value in values:
+            match = re.search(re.escape(str(value)), text)
+            if match:
+                add(kind, severity, str(value), match, tags, "pattern")
+    for operation in intelligence.get("graphql_operations", []):
+        name = operation.get("operation_name") or "anonymous"
+        match = re.search(rf"\b{re.escape(name)}\b", text) or re.match(r"", text)
+        variable_names = ", ".join(v["name"] for v in operation.get("variables", []))
+        indicator = f"{operation.get('operation_type')} {name}" + (f" ({variable_names})" if variable_names else "")
+        add("graphql-operation", "low", indicator, match, ["graphql", "operation", *operation.get("object_identifiers", [])], "pattern")
+    oauth = intelligence.get("oauth") or {}
+    if any(value for value in oauth.values()):
+        indicator = "OAuth client configuration" + (" with PKCE" if oauth.get("uses_pkce") else " without observed PKCE")
+        match = re.search(r"oauth|client[_-]?id|redirect[_-]?uri|code_challenge", text, re.I) or re.match(r"", text)
+        add("oauth-config", "low", indicator, match, ["oauth", "pkce" if oauth.get("uses_pkce") else "pkce-unobserved"], "pattern")
+
     if re.search(r"sourceMappingURL=.*\.map", text, re.I) or source_url.endswith(".map"):
         add("sourcemap", "medium", "Source map reference", re.search(r"sourceMappingURL=.*", text, re.I) or re.match(r".*", source_url), ["source-map", "review"], "pattern")
 
@@ -1034,10 +1061,10 @@ def analyze_js_text(text: str, source_url: str, page_url: str | None, target_dom
         if match:
             sink_hits.append(label)
             add("sink", "medium" if label in {"eval", "Function constructor", "document.write"} else "low", label, match, ["sink", "dom"])
-    if source_hits and sink_hits:
-        indicator = f"{source_hits[0]} → {sink_hits[0]}"
-        first_source = next(p.search(text) for _, p in JS_SOURCE_PATTERNS if p.search(text))
-        add("source-sink", "medium", indicator, first_source, ["source-sink", "xss", "manual-review"], "heuristic")
+    for flow in trace_dom_flows(text):
+        indicator = f"{flow['source']} → {flow['sink']}"
+        first_source = re.search(re.escape(flow.get("variable", "")), text) if flow.get("variable") else re.search(r"location|document|window", text)
+        add("source-sink", "medium", indicator, first_source or re.match(r"", text), ["source-sink", "xss", "traced", "manual-review"], "potential")
 
     return findings
 
@@ -1104,7 +1131,7 @@ def parse_trufflehog_json(text: str, file_to_url: dict[str, dict]) -> list[dict]
         raw_value = item.get("Raw") or item.get("RawV2") or item.get("Redacted") or detector
         redacted = item.get("Redacted") or (f"{str(raw_value)[:4]}…{str(raw_value)[-4:]}" if len(str(raw_value)) > 12 else "redacted")
         if verified:
-            severity = "high"
+            severity = "medium"
             confidence = "verified"
         elif verification_error:
             severity = "medium"
@@ -1128,9 +1155,9 @@ def parse_trufflehog_json(text: str, file_to_url: dict[str, dict]) -> list[dict]
             "line": line,
             "column": None,
             "confidence": confidence,
-            "classification": "probable_vulnerability" if verified else "interesting_lead",
-            "probable_vulnerability": verified,
-            "tags": ["secret", "trufflehog", confidence],
+            "classification": "interesting_lead",
+            "probable_vulnerability": False,
+            "tags": ["secret", "trufflehog", confidence, "scope-review", "usability-unverified"],
         })
     return findings
 

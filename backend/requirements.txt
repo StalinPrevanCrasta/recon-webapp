@@ -6,6 +6,8 @@ sqlalchemy==2.0.36
 pydantic==2.10.4
 python-multipart==0.0.20
 httpx==0.28.1
+PyYAML==6.0.2
+websockets==14.1
 docker==7.1.0
 pytest==8.3.4
 wappalyzer==2.0.2

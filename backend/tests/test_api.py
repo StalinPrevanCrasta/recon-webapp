@@ -264,6 +264,30 @@ def test_playground_dalfox_rejects_parameterless_url():
     assert "No testable parameter found" in response.json()["detail"]
 
 
+def test_payload_campaign_separates_findings_from_anomalies(monkeypatch):
+    from app import main
+
+    responses = iter([
+        {"status": 200, "body": "normal", "size": 6, "duration_ms": 50, "content_type": "text/plain", "error": None},
+        {"status": 500, "body": "different but no proof", "size": 200, "duration_ms": 60, "content_type": "text/plain", "error": None},
+        {"status": 200, "body": "Database says SQL syntax error", "size": 30, "duration_ms": 55, "content_type": "text/plain", "error": None},
+    ])
+    monkeypatch.setattr(main, "_campaign_response", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+    response = TestClient(app).post("/api/playground/payload-campaign", json={
+        "url_template": "https://example.com/search?q={{PAYLOAD}}",
+        "payloads": ["anomaly", "'"],
+        "delay_ms": 0,
+        "rate_limit_per_second": 50,
+    })
+    assert response.status_code == 200
+    rows = response.json()["results"]
+    assert rows[0]["found"] is False
+    assert "status or response-size anomaly" in rows[0]["evidence"]
+    assert rows[1]["found"] is True
+    assert "new database error signature" in rows[1]["evidence"]
+
+
 def test_playground_dalfox_accepts_form_body_parameters(monkeypatch):
     calls = []
 

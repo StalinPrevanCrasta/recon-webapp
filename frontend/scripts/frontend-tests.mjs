@@ -11,6 +11,14 @@ assert.match(src, /\/playground\/request/, 'playground can send HTTP requests th
 assert.match(src, /playground\/\$\{tool\}/, 'playground can run manual tools through backend');
 assert.match(src, /runTool\('arjun'\)/, 'playground can run Arjun manually');
 assert.match(src, /runTool\('dalfox'\)/, 'playground can run Dalfox manually');
+assert.match(src, /payload-campaign/, 'playground can run paced payload lists');
+assert.match(src, /\{\{PAYLOAD\}\}/, 'payload campaign exposes an explicit injection marker');
+assert.match(src, /function SecurityLabPage\(/, 'dedicated Security Lab page exists');
+assert.match(src, /LAB_ROLES/, 'Security Lab includes the role matrix');
+assert.match(src, /Account A/, 'Security Lab includes two-account comparison');
+assert.match(src, /security\/graphql\/matrix/, 'Security Lab builds a GraphQL authorization matrix');
+assert.match(src, /security\/websockets\/compare/, 'Security Lab includes two-session WebSocket replay');
+assert.match(src, /security\/uploads\/analyze/, 'Security Lab includes upload analysis');
 assert.match(src, /sendToPlayground/, 'result rows can be sent to playground');
 assert.match(src, /window\.open\('\/logs', '_blank', 'noopener,noreferrer'\)/, 'View Logs opens /logs in a safe new tab');
 assert.match(src, /function LogsPage\(/, 'dedicated LogsPage exists');

@@ -193,3 +193,60 @@ class PlaygroundToolRequest(BaseModel):
     arjun_request_timeout: int = Field(default=10, ge=3, le=60)
     arjun_stable: bool = True
     dalfox_options: str = ""
+
+
+class ArtifactParseRequest(BaseModel):
+    content: str = Field(max_length=10_000_000)
+    artifact_type: str = "auto"
+    source: str = "uploaded"
+
+
+class EndpointInventoryCompareRequest(BaseModel):
+    documented: list[dict] = Field(default_factory=list, max_length=20_000)
+    observed: list[dict] = Field(default_factory=list, max_length=20_000)
+
+
+class AuthorizationMatrixRequest(BaseModel):
+    cases: list[dict] = Field(default_factory=list, min_length=1, max_length=20)
+
+
+class PropertyCompareRequest(BaseModel):
+    original: dict = Field(default_factory=dict)
+    attempted: dict = Field(default_factory=dict)
+    response: dict = Field(default_factory=dict)
+    read_only: list[str] = Field(default_factory=list)
+
+
+class UploadAnalysisRequest(BaseModel):
+    filename: str
+    declared_mime: str = "application/octet-stream"
+    content_base64: str = Field(default="", max_length=14_000_000)
+    response: dict = Field(default_factory=dict)
+    retrieval_cases: list[dict] = Field(default_factory=list, max_length=20)
+
+
+class PayloadCampaignRequest(BaseModel):
+    method: str = "GET"
+    url_template: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_template: str = ""
+    body_type: str = "raw"
+    payloads: list[str] = Field(min_length=1, max_length=200)
+    delay_ms: int = Field(default=250, ge=0, le=10_000)
+    rate_limit_per_second: float = Field(default=2, gt=0, le=50)
+    timeout: int = Field(default=15, ge=1, le=45)
+    proxies: list[str] = Field(default_factory=list, max_length=20)
+    follow_redirects: bool = True
+    time_threshold_ms: int = Field(default=3000, ge=500, le=30_000)
+
+
+class WebSocketSession(BaseModel):
+    label: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    messages: list[str] = Field(default_factory=list, max_length=50)
+
+
+class WebSocketCompareRequest(BaseModel):
+    url: str
+    sessions: list[WebSocketSession] = Field(min_length=1, max_length=2)
+    timeout: int = Field(default=10, ge=1, le=30)

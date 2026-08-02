@@ -417,7 +417,7 @@ function Header({domain, setDomain, run, stopScan, result, targets, loadTarget, 
   const activeScan = ['queued', 'running', 'stopping'].includes(scan?.status);
   return <header>
     <div className="brand"><h1>{target}</h1><div className="header-meta"><Badge tone={scan?.status === 'complete' ? 'ok' : 'redirect'}>{scan?.status || 'ready'}</Badge><span>{counts}</span><span>Started: {ago(scan?.started_at || scan?.created_at)}</span></div></div>
-    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" onClick={openTargets}>Targets</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/playground', '_blank', 'noopener,noreferrer')}>Playground</button><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button>{activeScan && <button className="danger" disabled={scan?.status === 'stopping'} onClick={stopScan}>{scan?.status === 'stopping' ? 'Stopping…' : 'Stop scan'}</button>}<button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
+    <div className="runbox"><select onChange={e => { const t = targets.find(x => String(x.id) === e.target.value); if (t) loadTarget(t); }}><option>Recent targets</option>{targets.slice(0, 12).map(t => <option key={t.id} value={t.id}>{t.domain}</option>)}</select><input className="target-input" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com"/><button className="secondary" onClick={openTargets}>Targets</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/playground', '_blank', 'noopener,noreferrer')}>Playground</button><button className="secondary" onClick={() => window.open('/security-lab', '_blank', 'noopener,noreferrer')}>Security Lab</button><button className="secondary" title="Open live container logs" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button>{activeScan && <button className="danger" disabled={scan?.status === 'stopping'} onClick={stopScan}>{scan?.status === 'stopping' ? 'Stopping…' : 'Stop scan'}</button>}<button className="primary" disabled={runDisabled} title={runError || ''} onClick={run}>{runDisabled ? 'Fix options' : 'Run scan'}</button></div>{runError && <div className="inline-alert">{runError}</div>}
   </header>;
 }
 
@@ -624,7 +624,7 @@ function LandingPage({domain, setDomain, run, targets, loadTarget, runDisabled, 
   const examples = ['example.com', 'app.example.com', 'https://target.com'];
   const needsOptions = Boolean(runError);
   return <div className="landing-page">
-    <nav className="landing-nav"><b>Recon Radar</b><div className="landing-actions"><button className="secondary" onClick={() => window.open('/playground', '_blank', 'noopener,noreferrer')}>Playground</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button></div></nav>
+    <nav className="landing-nav"><b>Recon Radar</b><div className="landing-actions"><button className="secondary" onClick={() => window.open('/playground', '_blank', 'noopener,noreferrer')}>Playground</button><button className="secondary" onClick={() => window.open('/security-lab', '_blank', 'noopener,noreferrer')}>Security Lab</button><button className="secondary" onClick={openSettings}>Settings</button><button className="secondary" onClick={() => window.open('/logs', '_blank', 'noopener,noreferrer')}>View Logs</button></div></nav>
     <section className="landing-hero">
       <div className="landing-copy"><span className="eyebrow">Attack surface scanner</span><h1>Enter a target. Watch the surface resolve.</h1><p>Start with one domain and move into a focused scan workspace for subdomains, live hosts, content paths, vulnerabilities, screenshots, and raw output.</p></div>
       <form className="target-launcher" onSubmit={e => { e.preventDefault(); if (!runDisabled) run(); }}>
@@ -769,6 +769,14 @@ function PlaygroundPage() {
   const [busy, setBusy] = useState('');
   const [alert, setAlert] = useState('');
   const [urlTouched, setUrlTouched] = useState(Boolean(seed.url));
+  const [campaignOpen, setCampaignOpen] = useState(false);
+  const [payloadText, setPayloadText] = useState('');
+  const [campaignKind, setCampaignKind] = useState('xss');
+  const [campaignDelay, setCampaignDelay] = useState(250);
+  const [campaignRate, setCampaignRate] = useState(2);
+  const [campaignProxies, setCampaignProxies] = useState('');
+  const [campaignAuthorized, setCampaignAuthorized] = useState(false);
+  const [campaignResult, setCampaignResult] = useState(null);
 
   const refreshHistory = useCallback(() => j(`${API}/playground/history?limit=40`).then(r => setHistory(r.items || [])).catch(() => {}), []);
   useEffect(() => { refreshHistory(); }, [refreshHistory]);
@@ -893,12 +901,32 @@ function PlaygroundPage() {
     }
   }
 
+  async function runPayloadCampaign() {
+    setAlert(''); setCampaignResult(null);
+    if (!campaignAuthorized) { setAlert('Confirm that you are authorized to test this target.'); return; }
+    const payloads = payloadText.split(/\r?\n/).map(v => v.trim()).filter(v => v && !v.startsWith('#'));
+    if (!payloads.length) { setAlert('Load or paste at least one payload.'); return; }
+    if (!url.includes('{{PAYLOAD}}') && !body.includes('{{PAYLOAD}}')) { setAlert('Place {{PAYLOAD}} in the URL or request body.'); return; }
+    setBusy('payload campaign');
+    try {
+      const result = await j(`${API}/playground/payload-campaign`, {method: 'POST', body: JSON.stringify({
+        method, url_template: url, headers: headersObject, body_template: bodyType === 'none' ? '' : body,
+        body_type: bodyType, payloads, delay_ms: Number(campaignDelay) || 0,
+        rate_limit_per_second: Number(campaignRate) || 1, timeout: Number(timeout) || 20,
+        proxies: campaignProxies.split(/\r?\n/).map(v => v.trim()).filter(Boolean), follow_redirects: followRedirects,
+        time_threshold_ms: campaignKind === 'sqli' ? 3000 : 10000,
+      })});
+      setCampaignResult(result);
+    } catch (err) { setAlert(err.message || String(err)); }
+    finally { setBusy(''); }
+  }
+
   const statusTone = response?.error ? 'server' : response?.status_code ? statusClass(response.status_code) : 'muted';
   const discoveredParams = toolRuns.find(r => r.tool === 'arjun' && r.parameters?.length)?.parameters || [];
   const displayBody = responseTab === 'Pretty' ? prettyBody(response) : responseTab === 'Raw' ? (response?.response_body || 'No response yet.') : (response?.response_body || 'No response yet.');
   const filteredBody = bodySearch ? displayBody.split('\n').filter(line => line.toLowerCase().includes(bodySearch.toLowerCase())).join('\n') || 'No matches.' : displayBody;
   return <div className="playground-page">
-    <header className="playground-header"><div className="brand"><h1>Playground</h1><div className="header-meta"><Badge tone="redirect">Repeater</Badge><span>Manual request testing and focused tools</span></div></div><div className="runbox"><button className="secondary" onClick={() => window.location.href = '/'}>Dashboard</button><button className="secondary" onClick={refreshHistory}>Refresh history</button></div></header>
+    <header className="playground-header"><div className="brand"><h1>Playground</h1><div className="header-meta"><Badge tone="redirect">Repeater</Badge><span>Manual request testing and focused tools</span></div></div><div className="runbox"><button className="secondary" onClick={() => window.location.href = '/'}>Dashboard</button><button className="secondary" onClick={() => window.location.href = '/security-lab'}>Security Lab</button><button className="secondary" onClick={refreshHistory}>Refresh history</button></div></header>
     {alert && <div className="alert">{alert}</div>}
     <main className={`playground-layout ${historyOpen ? '' : 'history-collapsed'}`}>
       <section className="playground-compose">
@@ -910,7 +938,8 @@ function PlaygroundPage() {
         <div className="body-controls"><label>Body type <select value={bodyType} onChange={e => setBodyType(e.target.value)}>{[['none','None'],['form','Form URL encoded'],['json','JSON'],['raw','Raw']].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
         {bodyType !== 'none' && <textarea className="body-editor" value={body} onChange={e => setBody(e.target.value)} placeholder={bodyType === 'json' ? '{\n  "username": "test"\n}' : bodyType === 'form' ? 'username=test&redirect=/home' : 'Raw request body'}/>}
         <div className="playground-actions"><label>Timeout <input type="number" min="1" max="120" value={timeout} onChange={e => setTimeoutValue(e.target.value)}/></label><label><input type="checkbox" checked={followRedirects} onChange={e => setFollowRedirects(e.target.checked)}/> Follow redirects</label><button onClick={() => navigator.clipboard?.writeText(makeCurl({method, url, headers: headersObject, body, bodyType}))}>Copy curl</button></div>
-        <div className="focused-tools"><b>Focused tools</b><button onClick={() => runTool('arjun')} disabled={arjunDisabled}><span>Discover Parameters</span><small>Arjun</small></button><button onClick={() => runTool('dalfox')} disabled={dalfoxDisabled} title={dalfoxReason}><span>Scan for XSS</span><small>Dalfox</small></button>{dalfoxReason && urlValid && <p className="hint">{dalfoxReason}</p>}</div>
+        <div className="focused-tools"><b>Focused tools</b><button onClick={() => runTool('arjun')} disabled={arjunDisabled}><span>Discover Parameters</span><small>Arjun</small></button><button onClick={() => runTool('dalfox')} disabled={dalfoxDisabled} title={dalfoxReason}><span>Scan for XSS</span><small>Dalfox</small></button><button onClick={() => setCampaignOpen(!campaignOpen)}><span>Payload campaign</span><small>XSS / SQLi lists</small></button>{dalfoxReason && urlValid && <p className="hint">{dalfoxReason}</p>}</div>
+        {campaignOpen && <div className="campaign-panel"><div className="panel-title"><span>Payload campaign</span><Badge tone="warn">Manual · authorized targets only</Badge></div><p className="hint">Put <code>{'{{PAYLOAD}}'}</code> in the URL or body. A clean baseline is compared with every response; a status/size change alone is reported as an anomaly, not a finding.</p><div className="campaign-grid"><label>Payload type<select value={campaignKind} onChange={e => setCampaignKind(e.target.value)}><option value="xss">XSS</option><option value="sqli">SQL injection</option></select></label><label>Time gap (ms)<input type="number" min="0" max="10000" value={campaignDelay} onChange={e => setCampaignDelay(e.target.value)}/></label><label>Rate limit / second<input type="number" min="0.1" max="50" step="0.1" value={campaignRate} onChange={e => setCampaignRate(e.target.value)}/></label></div><label className="file-button">Load payload .txt<input type="file" accept=".txt,text/plain" onChange={async e => setPayloadText(e.target.files?.[0] ? await e.target.files[0].text() : '')}/></label><textarea className="body-editor" value={payloadText} onChange={e => setPayloadText(e.target.value)} placeholder="One payload per line"/><textarea className="raw-editor compact" value={campaignProxies} onChange={e => setCampaignProxies(e.target.value)} placeholder={'Optional proxy rotation, one URL per line\nhttp://127.0.0.1:8080'}/><label><input type="checkbox" checked={campaignAuthorized} onChange={e => setCampaignAuthorized(e.target.checked)}/> I am authorized to test this target and accept the configured request rate.</label><button className="primary" disabled={Boolean(busy) || !campaignAuthorized} onClick={runPayloadCampaign}>{busy === 'payload campaign' ? 'Testing payloads…' : `Run ${payloadText.split(/\r?\n/).filter(Boolean).length || 0} payloads`}</button></div>}
       </section>
       <section className="playground-response">
         <div className="panel-title"><span>Response</span>{response && <><Badge tone={statusTone}>{response.error ? 'error' : response.status_code || 'sent'}</Badge><em>{response.duration_ms || 0} ms</em><em>{formatBytes(response.response_size)}</em></>}</div>
@@ -920,9 +949,66 @@ function PlaygroundPage() {
         <div className="response-tabs"><div><b>Headers</b><pre>{JSON.stringify(response?.response_headers || {}, null, 2)}</pre></div><div><b>{responseTab === 'Preview' ? 'Sandboxed text preview' : 'Body'}</b><pre>{filteredBody}</pre></div></div>
         {discoveredParams.length > 0 && <div className="discovered-params"><div className="panel-title"><span>Discovered parameters</span><Badge tone="ok">{discoveredParams.length}</Badge></div>{discoveredParams.map(p => <label key={`${p.method}:${p.param}`}><input type="checkbox" checked={Boolean(selectedParams[`${p.method || 'GET'}:${p.param}`])} onChange={e => setSelectedParams(s => ({...s, [`${p.method || 'GET'}:${p.param}`]: e.target.checked}))}/><b>{p.param}</b><span>{p.method || 'GET'}</span></label>)}<div className="playground-actions"><button onClick={() => addSelectedToRequest(discoveredParams)}>Add selected to request</button><button onClick={() => runTool('dalfox', discoveredParams)} disabled={busy}>Run Dalfox on selected</button><button onClick={() => navigator.clipboard?.writeText(discoveredParams.map(p => `${p.param}\t${p.method || 'GET'}`).join('\n'))}>Copy results</button></div></div>}
         <div className="tool-runs"><div className="panel-title"><span>Tool Runs</span><Badge tone={busy ? 'redirect' : 'muted'}>{busy || 'idle'}</Badge></div>{toolRuns.length ? toolRuns.map(run => <div className="tool-card" key={run.id}><div><b>{run.tool === 'arjun' ? 'Arjun' : 'Dalfox'}</b><Badge tone={run.status === 'completed' ? 'ok' : run.status === 'failed' ? 'server' : 'redirect'}>{run.status}</Badge></div><p><span>Started: {new Date(run.startedAt).toLocaleTimeString()}</span><span>Elapsed: {Math.round((run.elapsedMs || (Date.now() - new Date(run.startedAt).getTime())) / 1000)}s</span><span>{run.tool === 'arjun' ? `Parameters found: ${run.parameters?.length || 0}` : `Findings: ${run.findings?.length || 0}`}</span></p><div className="playground-actions"><button onClick={() => navigator.clipboard?.writeText(makeCurl({method: run.request.method, url: run.request.url, headers: run.request.headers, body: run.request.body, bodyType: run.request.body_type}))}>View command</button><button onClick={() => navigator.clipboard?.writeText(run.logs || '')}>Copy output</button></div><pre>{run.logs || 'Queued.'}</pre></div>) : <p className="muted">Run Arjun or Dalfox on the current request.</p>}</div>
+        {campaignResult && <div className="campaign-results"><div className="panel-title"><span>Payload results</span><Badge tone={campaignResult.summary.found ? 'server' : 'ok'}>{campaignResult.summary.found} found / {campaignResult.summary.tested} tested</Badge></div><div className="campaign-result-list">{campaignResult.results.map(row => <div className={`campaign-result ${row.found ? 'found' : ''}`} key={row.index}><span>{row.found ? 'FOUND' : row.error ? 'ERROR' : 'Not found'}</span><code>{row.payload}</code><small>{row.status || '—'} · {row.duration_ms} ms · {row.size} B</small><p>{row.evidence.join(' · ') || row.error || 'No strong evidence compared with baseline.'}</p></div>)}</div></div>}
       </section>
       <aside className="playground-history"><div className="panel-title"><span>History</span><button onClick={() => setHistoryOpen(!historyOpen)}>{historyOpen ? 'Collapse' : 'Expand'}</button></div>{historyOpen && <><div className="playground-actions"><button onClick={() => setHistory([])}>Clear history</button></div>{history.length ? history.map(item => <div className="history-card" key={item.id}><button onClick={() => loadItem(item)}><b>{item.method} {requestPath(item.url)}</b><span>{item.status_code || item.error || 'sent'} · {item.duration_ms || 0} ms · {ago(item.created_at)}</span><small>{hostFromUrl(item.url)}</small></button><div><button onClick={() => loadItem(item)}>Pin item</button><button onClick={() => setHistory(items => items.filter(x => x.id !== item.id))}>Delete item</button></div></div>) : <p className="muted">No requests yet.</p>}</>}</aside>
     </main>
+  </div>;
+}
+
+function parseJsonInput(value, fallback = {}) {
+  try { return JSON.parse(value || JSON.stringify(fallback)); } catch { throw new Error('One of the JSON editors contains invalid JSON.'); }
+}
+
+const LAB_ROLES = ['anonymous', 'normal user', 'privileged user', 'organization member', 'organization administrator'];
+
+function SecurityLabPage() {
+  const [tab, setTab] = useState('API inventory');
+  const [busy, setBusy] = useState('');
+  const [alert, setAlert] = useState('');
+  const [result, setResult] = useState(null);
+  const [artifactType, setArtifactType] = useState('auto');
+  const [artifact, setArtifact] = useState('');
+  const [observed, setObserved] = useState('[]');
+  const [cases, setCases] = useState(LAB_ROLES.map((role, index) => ({role, session: index === 1 ? 'Account A' : index === 2 ? 'Account B' : '', status: role === 'anonymous' ? 401 : 200, body: '{}'})));
+  const [property, setProperty] = useState({original: '{\n  "name": "Alice",\n  "role": "user"\n}', attempted: '{\n  "name": "Alice",\n  "role": "admin",\n  "isAdmin": true\n}', response: '{}', readOnly: 'role,isAdmin'});
+  const [ws, setWs] = useState({url: '', aHeaders: '{}', bHeaders: '{}', messages: '{"type":"get","id":"123"}'});
+  const [upload, setUpload] = useState({file: null, mime: '', retrieval: '[]', location: ''});
+
+  async function call(path, payload) {
+    setBusy(path); setAlert(''); setResult(null);
+    try { setResult(await j(`${API}${path}`, {method: 'POST', body: JSON.stringify(payload)})); }
+    catch (err) { setAlert(err.message || String(err)); }
+    finally { setBusy(''); }
+  }
+
+  async function parseArtifact() {
+    const parsed = await j(`${API}/security/artifacts/parse`, {method: 'POST', body: JSON.stringify({content: artifact, artifact_type: artifactType, source: 'security-lab'})});
+    if (observed.trim() !== '[]') {
+      const compared = await j(`${API}/security/endpoints/compare`, {method: 'POST', body: JSON.stringify({documented: parsed.endpoints || [], observed: parseJsonInput(observed, [])})});
+      setResult({...parsed, comparison: compared});
+    } else setResult(parsed);
+  }
+
+  async function analyzeUploadFile() {
+    if (!upload.file) { setAlert('Choose an upload sample first.'); return; }
+    const content = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1] || ''); reader.onerror = reject; reader.readAsDataURL(upload.file); });
+    await call('/security/uploads/analyze', {filename: upload.file.name, declared_mime: upload.mime || upload.file.type || 'application/octet-stream', content_base64: content, response: {url: upload.location}, retrieval_cases: parseJsonInput(upload.retrieval, [])});
+  }
+
+  const updateCase = (index, patch) => setCases(rows => rows.map((row, i) => i === index ? {...row, ...patch} : row));
+  const authPayload = () => ({cases: cases.map(row => ({...row, body: parseJsonInput(row.body)}))});
+  const tabs = ['API inventory', 'Authorization', 'Properties', 'WebSockets', 'File uploads'];
+  return <div className="security-lab"><header className="playground-header"><div className="brand"><h1>Security Lab</h1><div className="header-meta"><Badge tone="client">Evidence workspace</Badge><span>API, OAuth, GraphQL, authorization, WebSocket, and upload testing</span></div></div><div className="runbox"><button onClick={() => window.location.href = '/'}>Dashboard</button><button onClick={() => window.location.href = '/playground'}>Playground</button></div></header>
+    {alert && <div className="alert">{alert}</div>}
+    <div className="lab-tabs">{tabs.map(name => <button key={name} className={tab === name ? 'sel' : ''} onClick={() => {setTab(name); setResult(null);}}>{name}</button>)}</div>
+    <main className="lab-layout"><section className="lab-editor">
+      {tab === 'API inventory' && <><h2>Unified endpoint inventory</h2><p>Parse OpenAPI/Swagger, Postman, GraphQL introspection, mobile config, source maps, or JavaScript. JS results separate API bases, route templates, WebSockets, flags, environments, GraphQL operations, OAuth configuration, and traced DOM flows.</p><div className="editor-head"><select value={artifactType} onChange={e => setArtifactType(e.target.value)}>{['auto','openapi','swagger','postman','graphql','mobile-config','source-map','javascript'].map(v => <option key={v}>{v}</option>)}</select><label className="file-button">Load artifact<input type="file" onChange={async e => setArtifact(e.target.files?.[0] ? await e.target.files[0].text() : '')}/></label></div><textarea className="lab-code" value={artifact} onChange={e => setArtifact(e.target.value)} placeholder="Paste or load an API artifact or JavaScript bundle"/><label>Observed endpoints (JSON array)<textarea className="lab-code small" value={observed} onChange={e => setObserved(e.target.value)} placeholder='[{"method":"GET","path":"/api/users/123"}]'/></label><button className="primary" disabled={Boolean(busy) || !artifact} onClick={async () => {setBusy('parse'); setAlert(''); try {await parseArtifact();} catch (e) {setAlert(e.message);} finally {setBusy('');}}}>Parse and compare</button></>}
+      {tab === 'Authorization' && <><h2>Role and two-account matrix</h2><p>Record the same request/GraphQL operation under Account A, Account B, and each application role. Object identifiers and returned-field differences are extracted automatically.</p><div className="auth-cases">{cases.map((row, index) => <div className="auth-case" key={row.role}><b>{row.role}</b><input value={row.session} onChange={e => updateCase(index, {session: e.target.value})} placeholder="Account A / B"/><input type="number" value={row.status} onChange={e => updateCase(index, {status: Number(e.target.value)})}/><input value={row.operation || ''} onChange={e => updateCase(index, {operation: e.target.value})} placeholder="GraphQL operation / request label"/><textarea value={row.body} onChange={e => updateCase(index, {body: e.target.value})} placeholder="Response JSON"/></div>)}</div><div className="playground-actions"><button className="primary" onClick={() => call('/security/authorization/compare', authPayload())}>Compare REST responses</button><button onClick={() => call('/security/graphql/matrix', authPayload())}>Build GraphQL matrix</button></div></>}
+      {tab === 'Properties' && <><h2>Mass-assignment and property authorization</h2><p>Compare the original object, attempted write, and server response. Mark read-only properties to detect accepted privileged fields.</p>{[['original','Original object'],['attempted','Attempted write'],['response','Server response']].map(([key,label]) => <label key={key}>{label}<textarea className="lab-code small" value={property[key]} onChange={e => setProperty({...property, [key]: e.target.value})}/></label>)}<label>Read-only fields<input value={property.readOnly} onChange={e => setProperty({...property, readOnly: e.target.value})} placeholder="role,isAdmin,ownerId"/></label><button className="primary" onClick={() => call('/security/properties/compare', {original: parseJsonInput(property.original), attempted: parseJsonInput(property.attempted), response: parseJsonInput(property.response), read_only: property.readOnly.split(',').map(v => v.trim()).filter(Boolean)})}>Compare properties</button></>}
+      {tab === 'WebSockets' && <><h2>Two-session WebSocket repeater</h2><p>Replay the same messages in two authenticated sessions and compare replies for authorization differences.</p><label>WebSocket URL<input value={ws.url} onChange={e => setWs({...ws, url: e.target.value})} placeholder="wss://target.example/ws"/></label><div className="two-col"><label>Account A headers<textarea value={ws.aHeaders} onChange={e => setWs({...ws, aHeaders: e.target.value})}/></label><label>Account B headers<textarea value={ws.bHeaders} onChange={e => setWs({...ws, bHeaders: e.target.value})}/></label></div><label>Messages, one per line<textarea className="lab-code small" value={ws.messages} onChange={e => setWs({...ws, messages: e.target.value})}/></label><button className="primary" onClick={() => call('/security/websockets/compare', {url: ws.url, sessions: [{label: 'Account A', headers: parseJsonInput(ws.aHeaders), messages: ws.messages.split(/\r?\n/).filter(Boolean)}, {label: 'Account B', headers: parseJsonInput(ws.bHeaders), messages: ws.messages.split(/\r?\n/).filter(Boolean)}]})}>Replay both sessions</button></>}
+      {tab === 'File uploads' && <><h2>File-upload analysis</h2><p>Compare extension, declared MIME, sniffed content, storage domain, generated filename, and retrieval authorization cases.</p><label className="file-button">Choose sample<input type="file" onChange={e => setUpload({...upload, file: e.target.files?.[0] || null})}/></label><label>Declared MIME<input value={upload.mime} onChange={e => setUpload({...upload, mime: e.target.value})} placeholder="image/jpeg"/></label><label>Returned storage URL<input value={upload.location} onChange={e => setUpload({...upload, location: e.target.value})} placeholder="https://cdn.example/file.jpg"/></label><label>Retrieval cases (JSON)<textarea className="lab-code small" value={upload.retrieval} onChange={e => setUpload({...upload, retrieval: e.target.value})} placeholder='[{"role":"Account B","status":200,"body":{}}]'/></label><button className="primary" onClick={analyzeUploadFile}>Analyze upload evidence</button></>}
+    </section><section className="lab-results"><div className="panel-title"><span>Analysis result</span>{busy && <Badge tone="redirect">Working…</Badge>}</div>{result ? <pre>{JSON.stringify(result, null, 2)}</pre> : <div className="lab-empty"><b>No analysis yet</b><span>Run the active workspace to see normalized evidence and findings.</span></div>}</section></main>
   </div>;
 }
 
@@ -1193,4 +1279,4 @@ function App() {
   <TargetLoadingScreen target={loadingTarget}/></>;
 }
 
-createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : window.location.pathname === '/playground' ? <PlaygroundPage/> : <App/>);
+createRoot(document.getElementById('root')).render(window.location.pathname === '/logs' ? <LogsPage/> : window.location.pathname === '/playground' ? <PlaygroundPage/> : window.location.pathname === '/security-lab' ? <SecurityLabPage/> : <App/>);

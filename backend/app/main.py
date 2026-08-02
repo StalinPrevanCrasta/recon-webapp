@@ -1,7 +1,10 @@
 import csv
+import base64
+import asyncio
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 import httpx as pyhttpx
+import websockets
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -21,7 +25,12 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.db import get_db, init_db
-from app.schemas import ArjunRunRequest, InterestingPatch, PlaygroundRequestSend, PlaygroundToolRequest, RunScanRequest, Settings, StageRerunRequest
+from app.schemas import (ArjunRunRequest, InterestingPatch, PlaygroundRequestSend, PlaygroundToolRequest,
+    RunScanRequest, Settings, StageRerunRequest, ArtifactParseRequest, EndpointInventoryCompareRequest,
+    AuthorizationMatrixRequest, PropertyCompareRequest, UploadAnalysisRequest, PayloadCampaignRequest,
+    WebSocketCompareRequest)
+from app.security_intel import (analyze_upload, compare_authorization_cases, compare_endpoint_inventory,
+    compare_properties, find_object_identifiers, parse_artifact)
 from app.settings_store import load_settings, save_settings
 from app.tasks import run_scan_task
 from app.recon.pipeline import clean_domain
@@ -370,6 +379,149 @@ def playground_dalfox(req: PlaygroundToolRequest):
     except Exception:
         findings = []
     return {"url": url, "ok": proc.returncode == 0, "returncode": proc.returncode, "parameters": params, "findings": findings, "stdout": proc.stdout[:PLAYGROUND_BODY_LIMIT], "stderr": proc.stderr[:PLAYGROUND_BODY_LIMIT], "request": {"method": method, "headers": _mask_playground_headers(headers), "body_type": req.body_type, "body": req.body or ""}}
+
+
+@app.post("/api/security/artifacts/parse")
+def security_parse_artifact(req: ArtifactParseRequest):
+    try:
+        return parse_artifact(req.content, req.artifact_type, req.source)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/security/endpoints/compare")
+def security_compare_endpoints(req: EndpointInventoryCompareRequest):
+    return compare_endpoint_inventory(req.documented, req.observed)
+
+
+@app.post("/api/security/authorization/compare")
+def security_compare_authorization(req: AuthorizationMatrixRequest):
+    return compare_authorization_cases(req.cases)
+
+
+@app.post("/api/security/graphql/matrix")
+def security_graphql_matrix(req: AuthorizationMatrixRequest):
+    result = compare_authorization_cases(req.cases)
+    result["operation_matrix"] = [
+        {"role": row.get("role"), "operation": row.get("operation"), "status": row.get("status"),
+         "errors": (row.get("body") or {}).get("errors", []) if isinstance(row.get("body"), dict) else [],
+         "returned_fields": row.get("fields", []), "object_identifiers": row.get("identifiers", [])}
+        for row in result["matrix"]
+    ]
+    return result
+
+
+@app.post("/api/security/objects/identify")
+def security_identify_objects(payload: dict):
+    return {"identifiers": find_object_identifiers(payload, location=str(payload.get("location", "body")))}
+
+
+@app.post("/api/security/properties/compare")
+def security_compare_property_authorization(req: PropertyCompareRequest):
+    return compare_properties(req.original, req.attempted, req.response, req.read_only)
+
+
+@app.post("/api/security/uploads/analyze")
+def security_analyze_upload(req: UploadAnalysisRequest):
+    try:
+        content = base64.b64decode(req.content_base64, validate=True) if req.content_base64 else b""
+    except Exception as exc:
+        raise HTTPException(422, "content_base64 is not valid base64") from exc
+    if len(content) > 10_000_000:
+        raise HTTPException(413, "Upload sample exceeds the 10 MB analysis limit.")
+    return analyze_upload(req.filename, req.declared_mime, content, req.response, req.retrieval_cases)
+
+
+def _campaign_response(method: str, url: str, headers: dict, body: str, timeout: int,
+                       follow_redirects: bool, proxy: str | None) -> dict:
+    started = time.monotonic()
+    try:
+        with pyhttpx.Client(proxy=proxy, follow_redirects=follow_redirects, timeout=timeout) as client:
+            response = client.request(method, url, headers=headers, content=body.encode() if body else None)
+        return {"status": response.status_code, "body": response.text[:PLAYGROUND_BODY_LIMIT],
+                "size": len(response.content), "duration_ms": int((time.monotonic() - started) * 1000),
+                "content_type": response.headers.get("content-type", ""), "error": None}
+    except Exception as exc:
+        return {"status": None, "body": "", "size": 0,
+                "duration_ms": int((time.monotonic() - started) * 1000), "content_type": "", "error": str(exc)}
+
+
+@app.post("/api/playground/payload-campaign")
+def playground_payload_campaign(req: PayloadCampaignRequest):
+    marker = "{{PAYLOAD}}"
+    if marker not in req.url_template and marker not in req.body_template:
+        raise HTTPException(422, f"Add {marker} to the URL or body where payloads should be inserted.")
+    _validate_playground_url(req.url_template.replace(marker, "baseline"))
+    proxies = []
+    for proxy in req.proxies:
+        parsed = urlparse(proxy)
+        if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.netloc:
+            raise HTTPException(422, f"Invalid proxy URL: {proxy}")
+        proxies.append(proxy)
+    method = req.method.upper()
+    headers = _playground_headers(req.headers, req.body_type)
+    baseline = _campaign_response(method, req.url_template.replace(marker, "baseline"), headers,
+                                  req.body_template.replace(marker, "baseline"), req.timeout, req.follow_redirects,
+                                  proxies[0] if proxies else None)
+    sql_error = re.compile(r"SQL syntax|mysql_fetch|ORA-\d+|PostgreSQL.*ERROR|SQLite.*(?:error|exception)|Unclosed quotation mark|ODBC SQL", re.I)
+    baseline_sql_error = bool(sql_error.search(baseline["body"]))
+    results = []
+    minimum_gap = max(req.delay_ms / 1000, 1 / req.rate_limit_per_second)
+    last_started = 0.0
+    for index, payload in enumerate(req.payloads):
+        wait_for = minimum_gap - (time.monotonic() - last_started)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        last_started = time.monotonic()
+        proxy = proxies[index % len(proxies)] if proxies else None
+        url = req.url_template.replace(marker, payload)
+        body = req.body_template.replace(marker, payload)
+        result = _campaign_response(method, url, headers, body, req.timeout, req.follow_redirects, proxy)
+        reflected = bool(payload and payload in result["body"] and payload not in baseline["body"])
+        new_sql_error = bool(sql_error.search(result["body"])) and not baseline_sql_error
+        timed = result["duration_ms"] >= baseline["duration_ms"] + req.time_threshold_ms
+        anomaly = (result["status"] != baseline["status"] or abs(result["size"] - baseline["size"]) > max(100, baseline["size"] * .25))
+        evidence = []
+        if reflected: evidence.append("payload reflected verbatim")
+        if new_sql_error: evidence.append("new database error signature")
+        if timed: evidence.append(f"response delayed {result['duration_ms'] - baseline['duration_ms']} ms over baseline")
+        if anomaly: evidence.append("status or response-size anomaly")
+        found = reflected or new_sql_error or timed
+        results.append({"index": index + 1, "payload": payload, "found": found,
+                        "confidence": "high" if new_sql_error else "medium" if found else "none",
+                        "evidence": evidence, "status": result["status"], "size": result["size"],
+                        "duration_ms": result["duration_ms"], "error": result["error"],
+                        "response_excerpt": result["body"][:500], "proxy_slot": index % len(proxies) if proxies else None})
+    return {"baseline": {k: v for k, v in baseline.items() if k != "body"}, "results": results,
+            "summary": {"tested": len(results), "found": sum(1 for row in results if row["found"]),
+                        "errors": sum(1 for row in results if row["error"]), "proxy_rotation": bool(proxies)}}
+
+
+async def _websocket_session(url: str, session, timeout: int) -> dict:
+    received = []
+    try:
+        async with websockets.connect(url, additional_headers=session.headers, open_timeout=timeout,
+                                      close_timeout=2) as socket:
+            for message in session.messages:
+                await socket.send(message)
+                try:
+                    received.append(await asyncio.wait_for(socket.recv(), timeout=timeout))
+                except TimeoutError:
+                    received.append(None)
+        return {"label": session.label, "messages": session.messages, "received": received, "error": None}
+    except Exception as exc:
+        return {"label": session.label, "messages": session.messages, "received": received, "error": str(exc)}
+
+
+@app.post("/api/security/websockets/compare")
+async def security_compare_websockets(req: WebSocketCompareRequest):
+    parsed = urlparse(req.url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise HTTPException(422, "WebSocket URL must use ws:// or wss://.")
+    sessions = await asyncio.gather(*[_websocket_session(req.url, session, req.timeout) for session in req.sessions])
+    same_responses = len(sessions) == 2 and sessions[0]["received"] == sessions[1]["received"]
+    return {"sessions": sessions, "same_responses": same_responses,
+            "authorization_signal": "review identical cross-session access" if same_responses else "responses differ"}
 
 @app.get("/api/wordlists")
 def list_wordlists(kind: str | None = None, db: Session = Depends(get_db)):

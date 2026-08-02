@@ -586,15 +586,15 @@ def test_parse_trufflehog_json_maps_files_to_js_findings():
         "source_url": "https://app.example/app.js",
         "file_path": "/tmp/app.js",
         "finding_type": "trufflehog-secret",
-        "severity": "high",
+        "severity": "medium",
         "indicator": "Github: ghp_…abcd",
         "evidence": "ghp_…abcd",
         "line": 12,
         "column": None,
         "confidence": "verified",
-        "classification": "probable_vulnerability",
-        "probable_vulnerability": True,
-        "tags": ["secret", "trufflehog", "verified"],
+        "classification": "interesting_lead",
+        "probable_vulnerability": False,
+        "tags": ["secret", "trufflehog", "verified", "scope-review", "usability-unverified"],
     }]
 
 
